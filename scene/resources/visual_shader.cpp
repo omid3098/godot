@@ -5392,3 +5392,39 @@ String VisualShaderNodeVaryingGetter::generate_code(Shader::Mode p_mode, VisualS
 VisualShaderNodeVaryingGetter::VisualShaderNodeVaryingGetter() {
 	varying_name = "[None]";
 }
+
+////////////// Group
+
+String VisualShaderNodeGroup::get_caption() const {
+	return "Group";
+}
+
+String VisualShaderNodeGroup::generate_code(Shader::Mode p_mode, VisualShader::Type p_type, int p_id, const String *p_input_vars, const String *p_output_vars, bool p_for_preview) const {
+	// TODO: Implement actual group functionality - likely involves processing an internal graph.
+	// For now, it behaves like an Expression node with no specific expression.
+	// We can potentially use the VisualShaderNodeExpression's code generation or a simplified version.
+
+	// If you want it to just pass through inputs to outputs based on name for now,
+	// that would require matching input port names to output port names.
+	// String code;
+	// for (int i = 0; i < get_output_port_count(); ++i) {
+	// 	 String output_name = get_output_port_name(i);
+	// 	 for (int j = 0; j < get_input_port_count(); ++j) {
+	// 		 if (get_input_port_name(j) == output_name) {
+	// 			 code += vformat("\t%s = %s;\n", p_output_vars[i], p_input_vars[j]);
+	// 			 break;
+	// 		 }
+	// 	 }
+	// }
+	// return code;
+	return String(); // No code generation for now.
+}
+
+void VisualShaderNodeGroup::_bind_methods() {
+	// No specific methods to bind for the basic version.
+}
+
+VisualShaderNodeGroup::VisualShaderNodeGroup() {
+	set_editable(true); // Allows users to add/remove input/output ports in the editor.
+	simple_decl = false; // Same as GroupBase
+}
