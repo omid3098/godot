@@ -867,8 +867,8 @@ public:
 	VisualShaderNodeGroupBase();
 };
 
-class VisualShaderNodeGroup : public VisualShaderNodeGroupBase {
-	GDCLASS(VisualShaderNodeGroup, VisualShaderNodeGroupBase);
+class VisualShaderNodeGroup : public VisualShaderNode {
+	GDCLASS(VisualShaderNodeGroup, VisualShaderNode);
 
 protected:
 	static void _bind_methods();
@@ -876,18 +876,33 @@ protected:
 public:
 	virtual String get_caption() const override;
 
-	// For now, no inputs or outputs, but we can add them later by overriding these.
-	// virtual int get_input_port_count() const override;
-	// virtual PortType get_input_port_type(int p_port) const override;
-	// virtual String get_input_port_name(int p_port) const override;
+	virtual int get_input_port_count() const override {
+		return 0; // No input ports for now
+	}
 
-	// virtual int get_output_port_count() const override;
-	// virtual PortType get_output_port_type(int p_port) const override;
-	// virtual String get_output_port_name(int p_port) const override;
+	virtual PortType get_input_port_type(int p_port) const override {
+		return PORT_TYPE_SCALAR; // Default type
+	}
+
+	virtual String get_input_port_name(int p_port) const override {
+		return ""; // No input ports for now
+	}
+
+	virtual int get_output_port_count() const override {
+		return 0; // No output ports for now
+	}
+
+	virtual PortType get_output_port_type(int p_port) const override {
+		return PORT_TYPE_SCALAR; // Default type
+	}
+
+	virtual String get_output_port_name(int p_port) const override {
+		return ""; // No output ports for now
+	}
 
 	virtual String generate_code(Shader::Mode p_mode, VisualShader::Type p_type, int p_id, const String *p_input_vars, const String *p_output_vars, bool p_for_preview = false) const override;
 
-	virtual Category get_category() const override { return CATEGORY_SPECIAL; } // Or a new category like CATEGORY_GROUPING
+	virtual Category get_category() const override { return CATEGORY_SPECIAL; }
 
 	VisualShaderNodeGroup();
 };

@@ -5425,6 +5425,5 @@ void VisualShaderNodeGroup::_bind_methods() {
 }
 
 VisualShaderNodeGroup::VisualShaderNodeGroup() {
-	set_editable(true); // Allows users to add/remove input/output ports in the editor.
 	simple_decl = false; // Same as GroupBase
 }
