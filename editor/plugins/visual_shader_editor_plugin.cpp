@@ -5006,6 +5006,31 @@ void VisualShaderEditor::_graph_gui_input(const Ref<InputEvent> &p_event) {
 			popup_menu->popup();
 		}
 	}
+
+	// Double click on a node to edit a group node
+	if (mb.is_valid() && mb->is_pressed() && mb->get_button_index() == MouseButton::LEFT && mb->is_double_click()) {
+		// Detect double-click on VisualShaderNodeGroup
+		for (int i = 0; i < graph->get_child_count(); i++) {
+			GraphElement *graph_element = Object::cast_to<GraphElement>(graph->get_child(i));
+			if (!graph_element) {
+				continue;
+			}
+			int id = String(graph_element->get_name()).to_int();
+			Ref<VisualShaderNode> vsnode = visual_shader->get_node(type, id);
+			Ref<VisualShaderNodeGroup> group_node = Object::cast_to<VisualShaderNodeGroup>(vsnode.ptr());
+			if (vsnode.is_valid() && group_node.is_valid()) {
+				// Open new visual shader graph for the group
+				_open_visual_shader_graph_for_group(id);
+				return; // Exit after handling the double-click
+			}
+		}
+	}
+}
+
+void VisualShaderEditor::_open_visual_shader_graph_for_group(int p_node_id) {
+	// Implement this method to handle the logic for opening a new visual shader graph when a group node is double-clicked.
+	// This method should be implemented in the VisualShaderEditor class.
+	print_line("Double-click detected on VisualShaderNodeGroup with ID: " + itos(p_node_id));
 }
 
 void VisualShaderEditor::_show_members_dialog(bool at_mouse_pos, VisualShaderNode::PortType p_input_port_type, VisualShaderNode::PortType p_output_port_type) {

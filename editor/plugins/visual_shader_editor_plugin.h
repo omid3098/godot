@@ -637,6 +637,8 @@ class VisualShaderEditor : public ShaderEditor {
 
 	void _help_open();
 
+	void _open_visual_shader_graph_for_group(int p_node_id);
+
 protected:
 	void _notification(int p_what);
 	static void _bind_methods();
