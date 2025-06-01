@@ -983,12 +983,15 @@ Vector2 VisualShader::get_node_position(Type p_type, int p_id) const {
 }
 
 Ref<VisualShaderNode> VisualShader::get_node(Type p_type, int p_id) const {
+	print_line("[VS_GROUP_DEBUG] VisualShader::get_node() - Type: ", p_type, ", ID: ", p_id);
 	ERR_FAIL_INDEX_V(p_type, TYPE_MAX, Ref<VisualShaderNode>());
 	const Graph *g = &graph[p_type];
 	if (!g->nodes.has(p_id)) {
+		print_line("[VS_GROUP_DEBUG] Node ID ", p_id, " not found in main shader graph");
 		return Ref<VisualShaderNode>();
 	}
 	ERR_FAIL_COND_V(!g->nodes.has(p_id), Ref<VisualShaderNode>());
+	print_line("[VS_GROUP_DEBUG] Successfully retrieved node ID ", p_id, " from main shader");
 	return g->nodes[p_id].node;
 }
 
@@ -5420,16 +5423,25 @@ String VisualShaderNodeGroup::get_caption() const {
 }
 
 void VisualShaderNodeGroup::add_internal_node(VisualShader::Type p_type, const Ref<VisualShaderNode> &p_node, const Vector2 &p_position, int p_id) {
+	print_line("[VS_GROUP_DEBUG] add_internal_node() - Type: ", p_type, ", Position: ", p_position, ", Requested ID: ", p_id);
+	print_line("[VS_GROUP_DEBUG] Node class: ", p_node.is_valid() ? p_node->get_class() : "NULL");
+
 	ERR_FAIL_INDEX(p_type, VisualShader::TYPE_MAX);
 	ERR_FAIL_COND(p_node.is_null());
 
 	InternalGraph *g = &internal_graph[p_type];
+	print_line("[VS_GROUP_DEBUG] Current internal graph has ", g->nodes.size(), " nodes");
 
 	if (p_id == -1) {
 		p_id = next_internal_node_id++;
+		print_line("[VS_GROUP_DEBUG] Auto-assigned ID: ", p_id);
 	}
 
-	ERR_FAIL_COND(p_id < 2);
+	// Allow IDs 0 and 1 for interface nodes, but prevent other low IDs
+	ERR_FAIL_COND(p_id < 0);
+	if (g->nodes.has(p_id)) {
+		print_line("[VS_GROUP_DEBUG] ERROR: Node ID ", p_id, " already exists!");
+	}
 	ERR_FAIL_COND(g->nodes.has(p_id));
 
 	InternalNode node;
@@ -5437,6 +5449,7 @@ void VisualShaderNodeGroup::add_internal_node(VisualShader::Type p_type, const R
 	node.position = p_position;
 
 	g->nodes[p_id] = node;
+	print_line("[VS_GROUP_DEBUG] Successfully added node with ID: ", p_id, " (total nodes: ", g->nodes.size(), ")");
 
 	p_node->connect_changed(callable_mp((Resource *)this, &Resource::emit_changed));
 }
@@ -5485,10 +5498,26 @@ Vector2 VisualShaderNodeGroup::get_internal_node_position(VisualShader::Type p_t
 }
 
 Ref<VisualShaderNode> VisualShaderNodeGroup::get_internal_node(VisualShader::Type p_type, int p_id) const {
+	print_line("[VS_GROUP_DEBUG] get_internal_node() - Type: ", p_type, ", ID: ", p_id);
+
 	ERR_FAIL_INDEX_V(p_type, VisualShader::TYPE_MAX, Ref<VisualShaderNode>());
 	const InternalGraph *g = &internal_graph[p_type];
+
+	print_line("[VS_GROUP_DEBUG] Internal graph has ", g->nodes.size(), " nodes");
+	if (g->nodes.size() > 0) {
+		print_line("[VS_GROUP_DEBUG] Available node IDs: ");
+		for (const KeyValue<int, InternalNode> &E : g->nodes) {
+			String node_class = E.value.node.is_valid() ? E.value.node->get_class() : "NULL";
+			print_line("[VS_GROUP_DEBUG]   - ID ", E.key, ": ", node_class);
+		}
+	}
+
+	if (!g->nodes.has(p_id)) {
+		print_line("[VS_GROUP_DEBUG] ERROR: Node ID ", p_id, " NOT FOUND in internal graph!");
+	}
 	ERR_FAIL_COND_V(!g->nodes.has(p_id), Ref<VisualShaderNode>());
 
+	print_line("[VS_GROUP_DEBUG] Successfully retrieved node ID ", p_id);
 	return g->nodes[p_id].node;
 }
 
@@ -5690,10 +5719,12 @@ Dictionary VisualShaderNodeGroup::_get_internal_graph_data(VisualShader::Type p_
 }
 
 void VisualShaderNodeGroup::_set_internal_graph_data(VisualShader::Type p_type, const Dictionary &p_data) {
+	print_line("[VS_GROUP_DEBUG] _set_internal_graph_data() - Type: ", p_type, ", Data size: ", p_data.size());
 	ERR_FAIL_INDEX(p_type, VisualShader::TYPE_MAX);
 	InternalGraph *g = &internal_graph[p_type];
 
 	// Clear existing data
+	print_line("[VS_GROUP_DEBUG] Clearing existing data (", g->nodes.size(), " nodes, ", g->connections.size(), " connections)");
 	g->nodes.clear();
 	g->connections.clear();
 
@@ -5708,6 +5739,7 @@ void VisualShaderNodeGroup::_set_internal_graph_data(VisualShader::Type p_type, 
 	// Load nodes
 	if (p_data.has("nodes")) {
 		Dictionary nodes_data = p_data["nodes"];
+		print_line("[VS_GROUP_DEBUG] Loading ", nodes_data.size(), " nodes from data");
 		for (const Variant *key = nodes_data.next(nullptr); key != nullptr; key = nodes_data.next(key)) {
 			int node_id = *key;
 			Dictionary node_data = nodes_data[*key];
@@ -5731,6 +5763,7 @@ void VisualShaderNodeGroup::_set_internal_graph_data(VisualShader::Type p_type, 
 	// Load connections
 	if (p_data.has("connections")) {
 		Array connections_data = p_data["connections"];
+		print_line("[VS_GROUP_DEBUG] Loading ", connections_data.size(), " connections from data");
 		for (int i = 0; i < connections_data.size(); i++) {
 			Dictionary connection_data = connections_data[i];
 			if (connection_data.has("from_node") && connection_data.has("from_port") &&
@@ -5753,6 +5786,7 @@ void VisualShaderNodeGroup::_set_internal_graph_data(VisualShader::Type p_type, 
 			}
 		}
 	}
+	print_line("[VS_GROUP_DEBUG] _set_internal_graph_data() completed - Final: ", g->nodes.size(), " nodes, ", g->connections.size(), " connections");
 }
 
 void VisualShaderNodeGroup::_apply_port_changes_internal() {
@@ -5805,4 +5839,132 @@ VisualShaderNodeGroup::VisualShaderNodeGroup() {
 	simple_decl = false; // Same as GroupBase
 	next_internal_node_id = 2; // Start after reserved IDs
 	set_editable(true);
+}
+
+////////////// Group Input Interface
+
+String VisualShaderNodeGroupInput::get_caption() const {
+	return "Group Input";
+}
+
+int VisualShaderNodeGroupInput::get_input_port_count() const {
+	return 0; // Group input has no input ports
+}
+
+VisualShaderNode::PortType VisualShaderNodeGroupInput::get_input_port_type(int p_port) const {
+	return PORT_TYPE_SCALAR;
+}
+
+String VisualShaderNodeGroupInput::get_input_port_name(int p_port) const {
+	return "";
+}
+
+int VisualShaderNodeGroupInput::get_output_port_count() const {
+	if (group_node.is_null()) {
+		return 0;
+	}
+	return group_node->get_input_port_count();
+}
+
+VisualShaderNode::PortType VisualShaderNodeGroupInput::get_output_port_type(int p_port) const {
+	if (group_node.is_null()) {
+		return PORT_TYPE_SCALAR;
+	}
+	return group_node->get_input_port_type(p_port);
+}
+
+String VisualShaderNodeGroupInput::get_output_port_name(int p_port) const {
+	if (group_node.is_null()) {
+		return "";
+	}
+	return group_node->get_input_port_name(p_port);
+}
+
+String VisualShaderNodeGroupInput::generate_code(Shader::Mode p_mode, VisualShader::Type p_type, int p_id, const String *p_input_vars, const String *p_output_vars, bool p_for_preview) const {
+	// Group input just passes through the group's input values
+	String code;
+	for (int i = 0; i < get_output_port_count(); i++) {
+		code += vformat("	%s = group_input_%d;\n", p_output_vars[i], i);
+	}
+	return code;
+}
+
+void VisualShaderNodeGroupInput::set_group_node(const Ref<VisualShaderNodeGroup> &p_group) {
+	group_node = p_group;
+}
+
+Ref<VisualShaderNodeGroup> VisualShaderNodeGroupInput::get_group_node() const {
+	return group_node;
+}
+
+void VisualShaderNodeGroupInput::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("set_group_node", "group_node"), &VisualShaderNodeGroupInput::set_group_node);
+	ClassDB::bind_method(D_METHOD("get_group_node"), &VisualShaderNodeGroupInput::get_group_node);
+}
+
+VisualShaderNodeGroupInput::VisualShaderNodeGroupInput() {
+}
+
+////////////// Group Output Interface
+
+String VisualShaderNodeGroupOutput::get_caption() const {
+	return "Group Output";
+}
+
+int VisualShaderNodeGroupOutput::get_input_port_count() const {
+	if (group_node.is_null()) {
+		return 0;
+	}
+	return group_node->get_output_port_count();
+}
+
+VisualShaderNode::PortType VisualShaderNodeGroupOutput::get_input_port_type(int p_port) const {
+	if (group_node.is_null()) {
+		return PORT_TYPE_SCALAR;
+	}
+	return group_node->get_output_port_type(p_port);
+}
+
+String VisualShaderNodeGroupOutput::get_input_port_name(int p_port) const {
+	if (group_node.is_null()) {
+		return "";
+	}
+	return group_node->get_output_port_name(p_port);
+}
+
+int VisualShaderNodeGroupOutput::get_output_port_count() const {
+	return 0; // Group output has no output ports
+}
+
+VisualShaderNode::PortType VisualShaderNodeGroupOutput::get_output_port_type(int p_port) const {
+	return PORT_TYPE_SCALAR;
+}
+
+String VisualShaderNodeGroupOutput::get_output_port_name(int p_port) const {
+	return "";
+}
+
+String VisualShaderNodeGroupOutput::generate_code(Shader::Mode p_mode, VisualShader::Type p_type, int p_id, const String *p_input_vars, const String *p_output_vars, bool p_for_preview) const {
+	// Group output receives values and passes them to the group's outputs
+	String code;
+	for (int i = 0; i < get_input_port_count(); i++) {
+		code += vformat("	group_output_%d = %s;\n", i, p_input_vars[i]);
+	}
+	return code;
+}
+
+void VisualShaderNodeGroupOutput::set_group_node(const Ref<VisualShaderNodeGroup> &p_group) {
+	group_node = p_group;
+}
+
+Ref<VisualShaderNodeGroup> VisualShaderNodeGroupOutput::get_group_node() const {
+	return group_node;
+}
+
+void VisualShaderNodeGroupOutput::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("set_group_node", "group_node"), &VisualShaderNodeGroupOutput::set_group_node);
+	ClassDB::bind_method(D_METHOD("get_group_node"), &VisualShaderNodeGroupOutput::get_group_node);
+}
+
+VisualShaderNodeGroupOutput::VisualShaderNodeGroupOutput() {
 }

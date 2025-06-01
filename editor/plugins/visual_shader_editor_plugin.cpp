@@ -209,10 +209,38 @@ void VisualShaderGraphPlugin::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_frame_color_enabled", "type", "id", "enabled"), &VisualShaderGraphPlugin::set_frame_color_enabled);
 	ClassDB::bind_method(D_METHOD("set_frame_color", "type", "id", "color"), &VisualShaderGraphPlugin::set_frame_color);
 	ClassDB::bind_method(D_METHOD("set_frame_autoshrink_enabled", "type", "id", "enabled"), &VisualShaderGraphPlugin::set_frame_autoshrink_enabled);
+	ClassDB::bind_method(D_METHOD("set_group_editing_mode", "enabled", "group_node", "type"), &VisualShaderGraphPlugin::set_group_editing_mode);
+	ClassDB::bind_method(D_METHOD("get_node_for_editing", "type", "id"), &VisualShaderGraphPlugin::get_node_for_editing);
 }
 
 void VisualShaderGraphPlugin::set_editor(VisualShaderEditor *p_editor) {
 	editor = p_editor;
+}
+void VisualShaderGraphPlugin::set_group_editing_mode(bool p_enabled, const Ref<VisualShaderNodeGroup> &p_group_node, VisualShader::Type p_type) {
+	editing_group = p_enabled;
+	current_group_node = p_group_node;
+	current_group_type = p_type;
+	print_line("[VS_GROUP_DEBUG] VisualShaderGraphPlugin::set_group_editing_mode() - Enabled: ", p_enabled);
+}
+
+Ref<VisualShaderNode> VisualShaderGraphPlugin::get_node_for_editing(VisualShader::Type p_type, int p_id) const {
+	if (editing_group && current_group_node.is_valid()) {
+		print_line("[VS_GROUP_DEBUG] Getting node from group internal graph - ID: ", p_id);
+		return current_group_node->get_internal_node(current_group_type, p_id);
+	} else {
+		print_line("[VS_GROUP_DEBUG] Getting node from main shader - ID: ", p_id);
+		return visual_shader->get_node(p_type, p_id);
+	}
+}
+
+Vector2 VisualShaderGraphPlugin::get_node_position_for_editing(VisualShader::Type p_type, int p_id) const {
+	if (editing_group && current_group_node.is_valid()) {
+		// Get position from the group's internal graph
+		return current_group_node->get_internal_node_position(p_type, p_id);
+	} else {
+		// Get position from the main visual shader
+		return visual_shader->get_node_position(p_type, p_id);
+	}
 }
 
 void VisualShaderGraphPlugin::register_shader(VisualShader *p_shader) {
@@ -540,8 +568,14 @@ void VisualShaderGraphPlugin::update_frames(VisualShader::Type p_type, int p_nod
 }
 
 void VisualShaderGraphPlugin::set_node_position(VisualShader::Type p_type, int p_id, const Vector2 &p_position) {
-	if (visual_shader->get_shader_type() == p_type && links.has(p_id)) {
-		links[p_id].graph_element->set_position_offset(p_position);
+	if (editing_group && current_group_node.is_valid()) {
+		// Set position in the group's internal graph
+		current_group_node->set_internal_node_position(p_type, p_id, p_position);
+	} else {
+		// Set position in the main visual shader
+		if (visual_shader->get_shader_type() == p_type && links.has(p_id)) {
+			links[p_id].graph_element->set_position_offset(p_position);
+		}
 	}
 }
 
@@ -606,6 +640,8 @@ bool VisualShaderGraphPlugin::is_node_has_parameter_instances_relatively(VisualS
 }
 
 void VisualShaderGraphPlugin::add_node(VisualShader::Type p_type, int p_id, bool p_just_update, bool p_update_frames) {
+	print_line("[VS_GROUP_DEBUG] VisualShaderGraphPlugin::add_node() - Type: ", p_type, ", ID: ", p_id, ", just_update: ", p_just_update);
+
 	if (visual_shader.is_null() || p_type != visual_shader->get_shader_type()) {
 		return;
 	}
@@ -651,7 +687,13 @@ void VisualShaderGraphPlugin::add_node(VisualShader::Type p_type, int p_id, bool
 
 	static const String vector_expanded_name[4] = { "red", "green", "blue", "alpha" };
 
-	Ref<VisualShaderNode> vsnode = visual_shader->get_node(p_type, p_id);
+	// Use group-aware node retrieval instead of direct visual_shader->get_node()
+	Ref<VisualShaderNode> vsnode = get_node_for_editing(p_type, p_id);
+	print_line("[VS_GROUP_DEBUG] Retrieved vsnode for ID ", p_id, ": ", vsnode.is_valid() ? vsnode->get_class() : "NULL");
+
+	if (vsnode.is_null()) {
+		print_line("[VS_GROUP_DEBUG] ERROR: vsnode is null for ID ", p_id, " in type ", p_type);
+	}
 	ERR_FAIL_COND(vsnode.is_null());
 
 	Ref<VisualShaderNodeResizableBase> resizable_node = vsnode;
@@ -711,6 +753,20 @@ void VisualShaderGraphPlugin::add_node(VisualShader::Type p_type, int p_id, bool
 		node->add_theme_style_override("titlebar_selected", sb_colored_selected);
 	}
 
+	// Add special styling for group interface nodes
+	if (is_group && (p_id == 0 || p_id == 1)) {
+		// Special color for Group Input/Output interface nodes
+		Color interface_color = Color(0.6, 0.8, 1.0, 1.0); // Light blue
+
+		Ref<StyleBoxFlat> sb_interface = editor->get_theme_stylebox("titlebar", "GraphNode")->duplicate();
+		sb_interface->set_bg_color(interface_color);
+		node->add_theme_style_override("titlebar", sb_interface);
+
+		Ref<StyleBoxFlat> sb_interface_selected = editor->get_theme_stylebox("titlebar_selected", "GraphNode")->duplicate();
+		sb_interface_selected->set_bg_color(interface_color.lightened(0.2));
+		node->add_theme_style_override("titlebar_selected", sb_interface_selected);
+	}
+
 	if (p_just_update) {
 		Link &link = links[p_id];
 
@@ -738,7 +794,7 @@ void VisualShaderGraphPlugin::add_node(VisualShader::Type p_type, int p_id, bool
 		expression = expression_node->get_expression();
 	}
 
-	node->set_position_offset(visual_shader->get_node_position(p_type, p_id));
+	node->set_position_offset(graph_plugin->get_node_position_for_editing(p_type, p_id));
 
 	node->connect("dragged", callable_mp(editor, &VisualShaderEditor::_node_dragged).bind(p_id));
 
@@ -2590,10 +2646,21 @@ void VisualShaderEditor::_update_graph() {
 	}
 
 	List<VisualShader::Connection> node_connections;
-	visual_shader->get_node_connections(type, &node_connections);
-	graph_plugin->set_connections(node_connections);
+	Vector<int> nodes;
 
-	Vector<int> nodes = visual_shader->get_node_list(type);
+	// Get nodes and connections based on editing mode
+	if (editing_group && !group_navigation_stack.is_empty()) {
+		GroupContext &current_context = group_navigation_stack.write[group_navigation_stack.size() - 1];
+		current_context.group_node->get_internal_node_connections(type, &node_connections);
+		nodes = current_context.group_node->get_internal_node_list(type);
+		print_line("[VS_GROUP_DEBUG] _update_graph() in group mode - Found ", nodes.size(), " nodes, ", node_connections.size(), " connections");
+	} else {
+		visual_shader->get_node_connections(type, &node_connections);
+		nodes = visual_shader->get_node_list(type);
+		print_line("[VS_GROUP_DEBUG] _update_graph() in main shader mode - Found ", nodes.size(), " nodes, ", node_connections.size(), " connections");
+	}
+
+	graph_plugin->set_connections(node_connections);
 
 	_update_parameters(false);
 	_update_varyings();
@@ -2615,9 +2682,16 @@ void VisualShaderEditor::_update_graph() {
 		graph->connect_node(itos(from), from_idx, itos(to), to_idx);
 	}
 
-	// Attach nodes to frames.
+	// Attach nodes to frames - need to handle both main shader and group modes
 	for (int node_id : nodes) {
-		Ref<VisualShaderNode> vsnode = visual_shader->get_node(type, node_id);
+		Ref<VisualShaderNode> vsnode;
+		if (editing_group && !group_navigation_stack.is_empty()) {
+			GroupContext &current_context = group_navigation_stack.write[group_navigation_stack.size() - 1];
+			vsnode = current_context.group_node->get_internal_node(type, node_id);
+		} else {
+			vsnode = visual_shader->get_node(type, node_id);
+		}
+
 		ERR_CONTINUE_MSG(vsnode.is_null(), "Node is null.");
 
 		if (vsnode->get_frame() != -1) {
@@ -4223,7 +4297,7 @@ void VisualShaderEditor::_connection_to_empty(const String &p_from, int p_from_s
 	from_slot = p_from_slot;
 	VisualShaderNode::PortType input_port_type = VisualShaderNode::PORT_TYPE_MAX;
 	VisualShaderNode::PortType output_port_type = VisualShaderNode::PORT_TYPE_MAX;
-	Ref<VisualShaderNode> node = visual_shader->get_node(get_current_shader_type(), from_node);
+	Ref<VisualShaderNode> node = graph_plugin->get_node_for_editing(get_current_shader_type(), from_node);
 	if (node.is_valid()) {
 		output_port_type = node->get_output_port_type(from_slot);
 	}
@@ -4235,7 +4309,7 @@ void VisualShaderEditor::_connection_from_empty(const String &p_to, int p_to_slo
 	to_slot = p_to_slot;
 	VisualShaderNode::PortType input_port_type = VisualShaderNode::PORT_TYPE_MAX;
 	VisualShaderNode::PortType output_port_type = VisualShaderNode::PORT_TYPE_MAX;
-	Ref<VisualShaderNode> node = visual_shader->get_node(get_current_shader_type(), to_node);
+	Ref<VisualShaderNode> node = graph_plugin->get_node_for_editing(get_current_shader_type(), to_node);
 	if (node.is_valid()) {
 		input_port_type = node->get_input_port_type(to_slot);
 	}
@@ -4255,14 +4329,14 @@ bool VisualShaderEditor::_check_node_drop_on_connection(const Vector2 &p_positio
 		GraphNode *graph_node = Object::cast_to<GraphNode>(graph->get_child(i));
 		if (graph_node && graph_node->is_selected()) {
 			selected_node_id = String(graph_node->get_name()).to_int();
-			Ref<VisualShaderNode> vsnode = visual_shader->get_node(shader_type, selected_node_id);
+			Ref<VisualShaderNode> vsnode = graph_plugin->get_node_for_editing(shader_type, selected_node_id);
 			if (!vsnode->is_deletable()) {
 				continue;
 			}
 
 			selected_node_count += 1;
 
-			Ref<VisualShaderNode> node = visual_shader->get_node(shader_type, selected_node_id);
+			Ref<VisualShaderNode> node = graph_plugin->get_node_for_editing(shader_type, selected_node_id);
 			selected_vsnode = node;
 			selected_node_rect = graph_node->get_rect();
 		}
@@ -4286,8 +4360,10 @@ bool VisualShaderEditor::_check_node_drop_on_connection(const Vector2 &p_positio
 		return false;
 	}
 
-	VisualShaderNode::PortType original_port_type_from = visual_shader->get_node(shader_type, String(intersecting_connection->from_node).to_int())->get_output_port_type(intersecting_connection->from_port);
-	VisualShaderNode::PortType original_port_type_to = visual_shader->get_node(shader_type, String(intersecting_connection->to_node).to_int())->get_input_port_type(intersecting_connection->to_port);
+	int from_id = String(intersecting_connection->from_node).to_int();
+	int to_id = String(intersecting_connection->to_node).to_int();
+	VisualShaderNode::PortType original_port_type_from = graph_plugin->get_node_for_editing(shader_type, from_id)->get_output_port_type(intersecting_connection->from_port);
+	VisualShaderNode::PortType original_port_type_to = graph_plugin->get_node_for_editing(shader_type, to_id)->get_input_port_type(intersecting_connection->to_port);
 
 	Ref<VisualShaderNodeReroute> reroute_node = selected_vsnode;
 
@@ -4387,7 +4463,7 @@ void VisualShaderEditor::_delete_nodes(int p_type, const List<int> &p_nodes) {
 	// The VS nodes need to be added before attaching them to frames.
 	for (const int &F : p_nodes) {
 		Ref<VisualShaderNode> node = visual_shader->get_node(type, F);
-		undo_redo->add_undo_method(visual_shader.ptr(), "add_node", type, node, visual_shader->get_node_position(type, F), F);
+		undo_redo->add_undo_method(visual_shader.ptr(), "add_node", type, node, graph_plugin->get_node_position_for_editing(type, F), F);
 		undo_redo->add_undo_method(graph_plugin.ptr(), "add_node", type, F, false, false);
 	}
 
@@ -4740,7 +4816,7 @@ void VisualShaderEditor::_detach_nodes_from_frame_request() {
 }
 
 void VisualShaderEditor::_delete_node_request(int p_type, int p_node) {
-	Ref<VisualShaderNode> node = visual_shader->get_node((VisualShader::Type)p_type, p_node);
+	Ref<VisualShaderNode> node = graph_plugin->get_node_for_editing((VisualShader::Type)p_type, p_node);
 	if (!node->is_deletable()) {
 		return;
 	}
@@ -4767,7 +4843,7 @@ void VisualShaderEditor::_delete_nodes_request(const TypedArray<StringName> &p_n
 
 			VisualShader::Type type = get_current_shader_type();
 			int id = String(graph_element->get_name()).to_int();
-			Ref<VisualShaderNode> vsnode = visual_shader->get_node(type, id);
+			Ref<VisualShaderNode> vsnode = graph_plugin->get_node_for_editing(type, id);
 			if (vsnode->is_deletable() && graph_element->is_selected()) {
 				to_erase.push_back(graph_element->get_name().operator String().to_int());
 			}
@@ -4776,7 +4852,7 @@ void VisualShaderEditor::_delete_nodes_request(const TypedArray<StringName> &p_n
 		VisualShader::Type type = get_current_shader_type();
 		for (int i = 0; i < p_nodes.size(); i++) {
 			int id = p_nodes[i].operator String().to_int();
-			Ref<VisualShaderNode> vsnode = visual_shader->get_node(type, id);
+			Ref<VisualShaderNode> vsnode = graph_plugin->get_node_for_editing(type, id);
 			if (vsnode->is_deletable()) {
 				to_erase.push_back(id);
 			}
@@ -4801,7 +4877,7 @@ void VisualShaderEditor::_node_selected(Object *p_node) {
 
 	int id = String(graph_element->get_name()).to_int();
 
-	Ref<VisualShaderNode> vsnode = visual_shader->get_node(type, id);
+	Ref<VisualShaderNode> vsnode = graph_plugin->get_node_for_editing(type, id);
 	ERR_FAIL_COND(vsnode.is_null());
 }
 
@@ -4835,7 +4911,7 @@ void VisualShaderEditor::_graph_gui_input(const Ref<InputEvent> &p_event) {
 				continue;
 			}
 			int id = String(graph_element->get_name()).to_int();
-			Ref<VisualShaderNode> vsnode = visual_shader->get_node(type, id);
+			Ref<VisualShaderNode> vsnode = graph_plugin->get_node_for_editing(type, id);
 
 			if (!graph_element->is_selected()) {
 				continue;
@@ -4849,7 +4925,7 @@ void VisualShaderEditor::_graph_gui_input(const Ref<InputEvent> &p_event) {
 
 			selected_deletable_graph_elements.push_back(id);
 
-			Ref<VisualShaderNode> node = visual_shader->get_node(type, id);
+			Ref<VisualShaderNode> node = graph_plugin->get_node_for_editing(type, id);
 			selected_vsnode = node;
 
 			VisualShaderNodeFrame *frame_node = Object::cast_to<VisualShaderNodeFrame>(node.ptr());
@@ -5028,9 +5104,145 @@ void VisualShaderEditor::_graph_gui_input(const Ref<InputEvent> &p_event) {
 }
 
 void VisualShaderEditor::_open_visual_shader_graph_for_group(int p_node_id) {
-	// Implement this method to handle the logic for opening a new visual shader graph when a group node is double-clicked.
-	// This method should be implemented in the VisualShaderEditor class.
-	print_line("Double-click detected on VisualShaderNodeGroup with ID: " + itos(p_node_id));
+	VisualShader::Type type = get_current_shader_type();
+	Ref<VisualShaderNode> vsnode = visual_shader->get_node(type, p_node_id);
+	Ref<VisualShaderNodeGroup> group_node = Object::cast_to<VisualShaderNodeGroup>(vsnode.ptr());
+
+	if (group_node.is_null()) {
+		return;
+	}
+
+	_enter_group_editing(p_node_id, type);
+}
+
+void VisualShaderEditor::_enter_group_editing(int p_group_node_id, VisualShader::Type p_type) {
+	print_line("[VS_GROUP_DEBUG] _enter_group_editing() - Group ID: ", p_group_node_id, ", Type: ", p_type);
+
+	Ref<VisualShaderNode> vsnode = visual_shader->get_node(p_type, p_group_node_id);
+	Ref<VisualShaderNodeGroup> group_node = Object::cast_to<VisualShaderNodeGroup>(vsnode.ptr());
+
+	if (group_node.is_null()) {
+		print_line("[VS_GROUP_DEBUG] ERROR: group_node is null for ID ", p_group_node_id);
+		return;
+	}
+
+	print_line("[VS_GROUP_DEBUG] Successfully cast to group node, proceeding with group editing");
+
+	// Save current context
+	GroupContext context;
+	context.group_name = "Group " + itos(p_group_node_id);
+	context.group_node_id = p_group_node_id;
+	context.group_type = p_type;
+	context.group_node = group_node;
+
+	group_navigation_stack.push_back(context);
+	editing_group = true;
+
+	// Set graph plugin to group editing mode
+	graph_plugin->set_group_editing_mode(true, group_node, get_current_shader_type());
+
+	// Clear the current graph
+	graph_plugin->clear_links();
+
+	print_line("[VS_GROUP_DEBUG] About to add group interface nodes");
+	// Add special Group Input and Output nodes
+	_add_group_interface_nodes(group_node);
+
+	_update_navigation_breadcrumb();
+	back_button->set_visible(true);
+	_update_graph();
+	print_line("[VS_GROUP_DEBUG] _enter_group_editing() completed");
+}
+
+void VisualShaderEditor::_add_group_interface_nodes(Ref<VisualShaderNodeGroup> p_group_node) {
+	print_line("[VS_GROUP_DEBUG] _add_group_interface_nodes() - START");
+	VisualShader::Type current_type = get_current_shader_type();
+	print_line("[VS_GROUP_DEBUG] Current shader type: ", current_type);
+
+	// Create and add Group Input node (ID 0)
+	print_line("[VS_GROUP_DEBUG] Checking for existing Group Input node (ID 0)");
+	if (p_group_node->get_internal_node(current_type, 0).is_null()) {
+		print_line("[VS_GROUP_DEBUG] Creating new Group Input node");
+		// Create a special input interface node
+		Ref<VisualShaderNodeGroupInput> input_interface = memnew(VisualShaderNodeGroupInput);
+		input_interface->set_group_node(p_group_node);
+
+		print_line("[VS_GROUP_DEBUG] Adding Group Input node to internal graph");
+		// Add it to the group's internal graph
+		p_group_node->add_internal_node(current_type, input_interface, Vector2(-200, 0), 0);
+	} else {
+		print_line("[VS_GROUP_DEBUG] Group Input node already exists - updating reference");
+		// Update the existing node's group reference
+		Ref<VisualShaderNodeGroupInput> existing_input = p_group_node->get_internal_node(current_type, 0);
+		if (existing_input.is_valid()) {
+			existing_input->set_group_node(p_group_node);
+		}
+	}
+
+	// Create and add Group Output node (ID 1)
+	print_line("[VS_GROUP_DEBUG] Checking for existing Group Output node (ID 1)");
+	if (p_group_node->get_internal_node(current_type, 1).is_null()) {
+		print_line("[VS_GROUP_DEBUG] Creating new Group Output node");
+		// Create a special output interface node
+		Ref<VisualShaderNodeGroupOutput> output_interface = memnew(VisualShaderNodeGroupOutput);
+		output_interface->set_group_node(p_group_node);
+
+		print_line("[VS_GROUP_DEBUG] Adding Group Output node to internal graph");
+		// Add it to the group's internal graph
+		p_group_node->add_internal_node(current_type, output_interface, Vector2(200, 0), 1);
+	} else {
+		print_line("[VS_GROUP_DEBUG] Group Output node already exists - updating reference");
+		// Update the existing node's group reference
+		Ref<VisualShaderNodeGroupOutput> existing_output = p_group_node->get_internal_node(current_type, 1);
+		if (existing_output.is_valid()) {
+			existing_output->set_group_node(p_group_node);
+		}
+	}
+
+	print_line("[VS_GROUP_DEBUG] _add_group_interface_nodes() - END");
+}
+
+void VisualShaderEditor::_exit_group_editing() {
+	if (group_navigation_stack.is_empty()) {
+		return;
+	}
+
+	group_navigation_stack.remove_at(group_navigation_stack.size() - 1);
+
+	if (group_navigation_stack.is_empty()) {
+		editing_group = false;
+		back_button->set_visible(false);
+
+		// Reset graph plugin to main shader mode
+		graph_plugin->set_group_editing_mode(false);
+
+		// Return to main shader view
+		_update_graph();
+	} else {
+		// Return to parent group
+		GroupContext &parent_context = group_navigation_stack.write[group_navigation_stack.size() - 1];
+
+		// Set graph plugin to parent group mode
+		graph_plugin->set_group_editing_mode(true, parent_context.group_node, parent_context.group_type);
+
+		_enter_group_editing(parent_context.group_node_id, parent_context.group_type);
+	}
+
+	_update_navigation_breadcrumb();
+}
+
+void VisualShaderEditor::_back_button_pressed() {
+	_exit_group_editing();
+}
+
+void VisualShaderEditor::_update_navigation_breadcrumb() {
+	String breadcrumb_text = "Main Shader";
+
+	for (int i = 0; i < group_navigation_stack.size(); i++) {
+		breadcrumb_text += " → " + group_navigation_stack[i].group_name;
+	}
+
+	navigation_breadcrumb->set_text(breadcrumb_text);
 }
 
 void VisualShaderEditor::_show_members_dialog(bool at_mouse_pos, VisualShaderNode::PortType p_input_port_type, VisualShaderNode::PortType p_output_port_type) {
@@ -5381,14 +5593,13 @@ void VisualShaderEditor::_dup_copy_nodes(int p_type, List<CopyItem> &r_items, Li
 			}
 
 			if (node.is_valid() && graph_element->is_selected()) {
-				Vector2 pos = visual_shader->get_node_position(type, id);
+				Vector2 pos = graph_plugin->get_node_position_for_editing(type, id);
 				selection_center += pos;
 
 				CopyItem item;
 				item.id = id;
 				item.node = visual_shader->get_node(type, id)->duplicate();
-				item.position = visual_shader->get_node_position(type, id);
-
+				item.position = graph_plugin->get_node_position_for_editing(type, id);
 				Ref<VisualShaderNodeResizableBase> resizable_base = node;
 				if (resizable_base.is_valid()) {
 					item.size = resizable_base->get_size();
@@ -6446,6 +6657,10 @@ void VisualShaderEditor::_bind_methods() {
 	ClassDB::bind_method("_update_parameter", &VisualShaderEditor::_update_parameter);
 	ClassDB::bind_method("_update_next_previews", &VisualShaderEditor::_update_next_previews);
 	ClassDB::bind_method("_update_current_param", &VisualShaderEditor::_update_current_param);
+	ClassDB::bind_method("_back_button_pressed", &VisualShaderEditor::_back_button_pressed);
+	ClassDB::bind_method("_update_navigation_breadcrumb", &VisualShaderEditor::_update_navigation_breadcrumb);
+	ClassDB::bind_method("_exit_group_editing", &VisualShaderEditor::_exit_group_editing);
+	ClassDB::bind_method("_enter_group_editing", &VisualShaderEditor::_enter_group_editing);
 }
 
 VisualShaderEditor::VisualShaderEditor() {
@@ -6641,6 +6856,24 @@ VisualShaderEditor::VisualShaderEditor() {
 
 	graph->connect("graph_elements_linked_to_frame_request", callable_mp(this, &VisualShaderEditor::_nodes_linked_to_frame_request));
 	graph->connect("frame_rect_changed", callable_mp(this, &VisualShaderEditor::_frame_rect_changed));
+
+	back_button = memnew(Button);
+	back_button->set_flat(true);
+	back_button->set_text("← Back");
+	back_button->set_visible(false);
+	back_button->connect("pressed", callable_mp(this, &VisualShaderEditor::_back_button_pressed));
+	toolbar->add_child(back_button);
+	toolbar->move_child(back_button, 0);
+
+	navigation_breadcrumb = memnew(Label);
+	navigation_breadcrumb->set_text("Main Shader");
+	navigation_breadcrumb->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
+	toolbar->add_child(navigation_breadcrumb);
+	toolbar->move_child(navigation_breadcrumb, 1);
+
+	VSeparator *nav_separator = memnew(VSeparator);
+	toolbar->add_child(nav_separator);
+	toolbar->move_child(nav_separator, 2);
 
 	varying_button = memnew(MenuButton);
 	varying_button->set_text(TTR("Manage Varyings"));

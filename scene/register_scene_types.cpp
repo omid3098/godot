@@ -805,6 +805,8 @@ void register_scene_types() {
 	GDREGISTER_CLASS(VisualShaderNodeExpression);
 	GDREGISTER_CLASS(VisualShaderNodeGlobalExpression);
 	GDREGISTER_CLASS(VisualShaderNodeGroup);
+	GDREGISTER_CLASS(VisualShaderNodeGroupInput);
+	GDREGISTER_CLASS(VisualShaderNodeGroupOutput);
 	GDREGISTER_CLASS(VisualShaderNodeIs);
 	GDREGISTER_CLASS(VisualShaderNodeCompare);
 	GDREGISTER_CLASS(VisualShaderNodeMultiplyAdd);

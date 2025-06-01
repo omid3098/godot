@@ -133,6 +133,11 @@ private:
 	// Visual shader specific theme for using MSDF fonts (on GraphNodes) which reduce aliasing at higher zoom levels.
 	Ref<Theme> vs_msdf_fonts_theme;
 
+	// Group editing state
+	bool editing_group = false;
+	Ref<VisualShaderNodeGroup> current_group_node;
+	VisualShader::Type current_group_type = VisualShader::TYPE_MAX;
+
 protected:
 	static void _bind_methods();
 
@@ -177,6 +182,11 @@ public:
 	bool is_node_has_parameter_instances_relatively(VisualShader::Type p_type, int p_node) const;
 	VisualShader::Type get_shader_type() const;
 
+	void set_group_editing_mode(bool p_enabled, const Ref<VisualShaderNodeGroup> &p_group_node = Ref<VisualShaderNodeGroup>(), VisualShader::Type p_type = VisualShader::TYPE_MAX);
+	bool is_group_editing_mode() const { return editing_group; }
+	Ref<VisualShaderNode> get_node_for_editing(VisualShader::Type p_type, int p_id) const;
+	Vector2 get_node_position_for_editing(VisualShader::Type p_type, int p_id) const;
+
 	VisualShaderGraphPlugin();
 };
 
@@ -220,6 +230,19 @@ class VisualShaderEditor : public ShaderEditor {
 	Button *code_preview_button = nullptr;
 	Button *shader_preview_button = nullptr;
 	Control *toolbar = nullptr;
+
+	// Group navigation state
+	struct GroupContext {
+		String group_name;
+		int group_node_id;
+		VisualShader::Type group_type;
+		Ref<VisualShaderNodeGroup> group_node;
+	};
+
+	Vector<GroupContext> group_navigation_stack;
+	Button *back_button = nullptr;
+	Label *navigation_breadcrumb = nullptr;
+	bool editing_group = false;
 
 	int last_to_node = -1;
 	int last_to_port = -1;
@@ -638,6 +661,12 @@ class VisualShaderEditor : public ShaderEditor {
 	void _help_open();
 
 	void _open_visual_shader_graph_for_group(int p_node_id);
+
+	void _back_button_pressed();
+	void _update_navigation_breadcrumb();
+	void _exit_group_editing();
+	void _enter_group_editing(int p_group_node_id, VisualShader::Type p_type);
+	void _add_group_interface_nodes(Ref<VisualShaderNodeGroup> p_group_node);
 
 protected:
 	void _notification(int p_what);
