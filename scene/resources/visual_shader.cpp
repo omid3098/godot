@@ -1776,6 +1776,12 @@ bool VisualShader::_set(const StringName &p_name, const Variant &p_value) {
 		} else if (what == "expression") {
 			((VisualShaderNodeExpression *)get_node(type, id).ptr())->set_expression(p_value);
 			return true;
+		} else if (what == "internal_graph") {
+			VisualShaderNodeGroup *group = Object::cast_to<VisualShaderNodeGroup>(get_node(type, id).ptr());
+			if (group) {
+				group->_set_internal_graph_data(type, p_value);
+			}
+			return true;
 		}
 	}
 	return false;
@@ -1863,6 +1869,14 @@ bool VisualShader::_get(const StringName &p_name, Variant &r_ret) const {
 		} else if (what == "expression") {
 			r_ret = ((VisualShaderNodeExpression *)get_node(type, id).ptr())->get_expression();
 			return true;
+		} else if (what == "internal_graph") {
+			VisualShaderNodeGroup *group = Object::cast_to<VisualShaderNodeGroup>(get_node(type, id).ptr());
+			if (group) {
+				r_ret = group->_get_internal_graph_data(type);
+			} else {
+				r_ret = Dictionary();
+			}
+			return true;
 		}
 	}
 	return false;
@@ -1941,6 +1955,12 @@ void VisualShader::_get_property_list(List<PropertyInfo> *p_list) const {
 			}
 			if (Object::cast_to<VisualShaderNodeExpression>(E.value.node.ptr()) != nullptr) {
 				p_list->push_back(PropertyInfo(Variant::STRING, prop_name + "/expression", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR));
+			}
+			if (Object::cast_to<VisualShaderNodeExpression>(E.value.node.ptr()) != nullptr) {
+				p_list->push_back(PropertyInfo(Variant::STRING, prop_name + "/expression", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR));
+			}
+			if (Object::cast_to<VisualShaderNodeGroup>(E.value.node.ptr()) != nullptr) {
+				p_list->push_back(PropertyInfo(Variant::DICTIONARY, prop_name + "/internal_graph", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR));
 			}
 		}
 		p_list->push_back(PropertyInfo(Variant::PACKED_INT32_ARRAY, "nodes/" + String(type_string[i]) + "/connections", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR));
@@ -5399,31 +5419,390 @@ String VisualShaderNodeGroup::get_caption() const {
 	return "Group";
 }
 
-String VisualShaderNodeGroup::generate_code(Shader::Mode p_mode, VisualShader::Type p_type, int p_id, const String *p_input_vars, const String *p_output_vars, bool p_for_preview) const {
-	// TODO: Implement actual group functionality - likely involves processing an internal graph.
-	// For now, it behaves like an Expression node with no specific expression.
-	// We can potentially use the VisualShaderNodeExpression's code generation or a simplified version.
+void VisualShaderNodeGroup::add_internal_node(VisualShader::Type p_type, const Ref<VisualShaderNode> &p_node, const Vector2 &p_position, int p_id) {
+	ERR_FAIL_INDEX(p_type, VisualShader::TYPE_MAX);
+	ERR_FAIL_COND(p_node.is_null());
 
-	// If you want it to just pass through inputs to outputs based on name for now,
-	// that would require matching input port names to output port names.
-	// String code;
-	// for (int i = 0; i < get_output_port_count(); ++i) {
-	// 	 String output_name = get_output_port_name(i);
-	// 	 for (int j = 0; j < get_input_port_count(); ++j) {
-	// 		 if (get_input_port_name(j) == output_name) {
-	// 			 code += vformat("\t%s = %s;\n", p_output_vars[i], p_input_vars[j]);
-	// 			 break;
-	// 		 }
-	// 	 }
-	// }
-	// return code;
-	return String(); // No code generation for now.
+	InternalGraph *g = &internal_graph[p_type];
+
+	if (p_id == -1) {
+		p_id = next_internal_node_id++;
+	}
+
+	ERR_FAIL_COND(p_id < 2);
+	ERR_FAIL_COND(g->nodes.has(p_id));
+
+	InternalNode node;
+	node.node = p_node;
+	node.position = p_position;
+
+	g->nodes[p_id] = node;
+
+	p_node->connect_changed(callable_mp((Resource *)this, &Resource::emit_changed));
+}
+
+void VisualShaderNodeGroup::remove_internal_node(VisualShader::Type p_type, int p_id) {
+	ERR_FAIL_INDEX(p_type, VisualShader::TYPE_MAX);
+	ERR_FAIL_COND(p_id < 2);
+	InternalGraph *g = &internal_graph[p_type];
+	ERR_FAIL_COND(!g->nodes.has(p_id));
+
+	g->nodes[p_id].node->disconnect_changed(callable_mp((Resource *)this, &Resource::emit_changed));
+
+	g->nodes.erase(p_id);
+
+	for (List<VisualShader::Connection>::Element *E = g->connections.front(); E;) {
+		List<VisualShader::Connection>::Element *N = E->next();
+		const VisualShader::Connection &connection = E->get();
+		if (connection.from_node == p_id || connection.to_node == p_id) {
+			if (connection.from_node == p_id) {
+				g->nodes[connection.to_node].prev_connected_nodes.erase(p_id);
+				g->nodes[connection.to_node].node->set_input_port_connected(connection.to_port, false);
+			} else if (connection.to_node == p_id) {
+				g->nodes[connection.from_node].next_connected_nodes.erase(p_id);
+				g->nodes[connection.from_node].node->set_output_port_connected(connection.from_port, false);
+			}
+			g->connections.erase(E);
+		}
+		E = N;
+	}
+
+	emit_changed();
+}
+
+void VisualShaderNodeGroup::set_internal_node_position(VisualShader::Type p_type, int p_id, const Vector2 &p_position) {
+	ERR_FAIL_INDEX(p_type, VisualShader::TYPE_MAX);
+	InternalGraph *g = &internal_graph[p_type];
+	ERR_FAIL_COND(!g->nodes.has(p_id));
+	g->nodes[p_id].position = p_position;
+}
+
+Vector2 VisualShaderNodeGroup::get_internal_node_position(VisualShader::Type p_type, int p_id) const {
+	ERR_FAIL_INDEX_V(p_type, VisualShader::TYPE_MAX, Vector2());
+	const InternalGraph *g = &internal_graph[p_type];
+	ERR_FAIL_COND_V(!g->nodes.has(p_id), Vector2());
+	return g->nodes[p_id].position;
+}
+
+Ref<VisualShaderNode> VisualShaderNodeGroup::get_internal_node(VisualShader::Type p_type, int p_id) const {
+	ERR_FAIL_INDEX_V(p_type, VisualShader::TYPE_MAX, Ref<VisualShaderNode>());
+	const InternalGraph *g = &internal_graph[p_type];
+	ERR_FAIL_COND_V(!g->nodes.has(p_id), Ref<VisualShaderNode>());
+
+	return g->nodes[p_id].node;
+}
+
+Vector<int> VisualShaderNodeGroup::get_internal_node_list(VisualShader::Type p_type) const {
+	ERR_FAIL_INDEX_V(p_type, VisualShader::TYPE_MAX, Vector<int>());
+	const InternalGraph *g = &internal_graph[p_type];
+
+	Vector<int> ret;
+	for (const KeyValue<int, InternalNode> &E : g->nodes) {
+		ret.push_back(E.key);
+	}
+
+	return ret;
+}
+
+int VisualShaderNodeGroup::get_valid_internal_node_id(VisualShader::Type p_type) const {
+	ERR_FAIL_INDEX_V(p_type, VisualShader::TYPE_MAX, -1);
+	return next_internal_node_id;
+}
+
+bool VisualShaderNodeGroup::can_connect_internal_nodes(VisualShader::Type p_type, int p_from_node, int p_from_port, int p_to_node, int p_to_port) const {
+	ERR_FAIL_INDEX_V(p_type, VisualShader::TYPE_MAX, false);
+	const InternalGraph *g = &internal_graph[p_type];
+
+	if (!g->nodes.has(p_from_node)) {
+		return false;
+	}
+
+	if (p_from_node == p_to_node) {
+		return false;
+	}
+
+	if (p_from_port < 0 || p_from_port >= g->nodes[p_from_node].node->get_expanded_output_port_count()) {
+		return false;
+	}
+
+	if (!g->nodes.has(p_to_node)) {
+		return false;
+	}
+
+	if (p_to_port < 0 || p_to_port >= g->nodes[p_to_node].node->get_input_port_count()) {
+		return false;
+	}
+
+	VisualShaderNode::PortType from_port_type = g->nodes[p_from_node].node->get_output_port_type(p_from_port);
+	VisualShaderNode::PortType to_port_type = g->nodes[p_to_node].node->get_input_port_type(p_to_port);
+
+	// Use the same port compatibility logic as VisualShader
+	if (!(MAX(0, from_port_type - (int)VisualShaderNode::PORT_TYPE_BOOLEAN) == (MAX(0, to_port_type - (int)VisualShaderNode::PORT_TYPE_BOOLEAN)))) {
+		return false;
+	}
+
+	for (const VisualShader::Connection &E : g->connections) {
+		if (E.from_node == p_from_node && E.from_port == p_from_port && E.to_node == p_to_node && E.to_port == p_to_port) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+Error VisualShaderNodeGroup::connect_internal_nodes(VisualShader::Type p_type, int p_from_node, int p_from_port, int p_to_node, int p_to_port) {
+	ERR_FAIL_INDEX_V(p_type, VisualShader::TYPE_MAX, ERR_INVALID_PARAMETER);
+	InternalGraph *g = &internal_graph[p_type];
+
+	if (!can_connect_internal_nodes(p_type, p_from_node, p_from_port, p_to_node, p_to_port)) {
+		return ERR_INVALID_PARAMETER;
+	}
+
+	for (const VisualShader::Connection &E : g->connections) {
+		if (E.from_node == p_from_node && E.from_port == p_from_port && E.to_node == p_to_node && E.to_port == p_to_port) {
+			ERR_FAIL_V(ERR_ALREADY_EXISTS);
+		}
+	}
+
+	VisualShader::Connection c;
+	c.from_node = p_from_node;
+	c.from_port = p_from_port;
+	c.to_node = p_to_node;
+	c.to_port = p_to_port;
+	g->connections.push_back(c);
+	g->nodes[p_from_node].next_connected_nodes.push_back(p_to_node);
+	g->nodes[p_to_node].prev_connected_nodes.push_back(p_from_node);
+	g->nodes[p_from_node].node->set_output_port_connected(p_from_port, true);
+	g->nodes[p_to_node].node->set_input_port_connected(p_to_port, true);
+
+	emit_changed();
+	return OK;
+}
+
+void VisualShaderNodeGroup::disconnect_internal_nodes(VisualShader::Type p_type, int p_from_node, int p_from_port, int p_to_node, int p_to_port) {
+	ERR_FAIL_INDEX(p_type, VisualShader::TYPE_MAX);
+	InternalGraph *g = &internal_graph[p_type];
+
+	for (List<VisualShader::Connection>::Element *E = g->connections.front(); E; E = E->next()) {
+		if (E->get().from_node == p_from_node && E->get().from_port == p_from_port && E->get().to_node == p_to_node && E->get().to_port == p_to_port) {
+			g->connections.erase(E);
+			g->nodes[p_from_node].next_connected_nodes.erase(p_to_node);
+			g->nodes[p_to_node].prev_connected_nodes.erase(p_from_node);
+			g->nodes[p_from_node].node->set_output_port_connected(p_from_port, false);
+			g->nodes[p_to_node].node->set_input_port_connected(p_to_port, false);
+			emit_changed();
+			return;
+		}
+	}
+}
+
+void VisualShaderNodeGroup::connect_internal_nodes_forced(VisualShader::Type p_type, int p_from_node, int p_from_port, int p_to_node, int p_to_port) {
+	ERR_FAIL_INDEX(p_type, VisualShader::TYPE_MAX);
+	InternalGraph *g = &internal_graph[p_type];
+
+	ERR_FAIL_COND(!g->nodes.has(p_from_node));
+	ERR_FAIL_INDEX(p_from_port, g->nodes[p_from_node].node->get_expanded_output_port_count());
+	ERR_FAIL_COND(!g->nodes.has(p_to_node));
+	ERR_FAIL_INDEX(p_to_port, g->nodes[p_to_node].node->get_input_port_count());
+
+	for (const VisualShader::Connection &E : g->connections) {
+		if (E.from_node == p_from_node && E.from_port == p_from_port && E.to_node == p_to_node && E.to_port == p_to_port) {
+			return;
+		}
+	}
+
+	VisualShader::Connection c;
+	c.from_node = p_from_node;
+	c.from_port = p_from_port;
+	c.to_node = p_to_node;
+	c.to_port = p_to_port;
+	g->connections.push_back(c);
+	g->nodes[p_from_node].next_connected_nodes.push_back(p_to_node);
+	g->nodes[p_to_node].prev_connected_nodes.push_back(p_from_node);
+	g->nodes[p_from_node].node->set_output_port_connected(p_from_port, true);
+	g->nodes[p_to_node].node->set_input_port_connected(p_to_port, true);
+
+	emit_changed();
+}
+
+bool VisualShaderNodeGroup::is_internal_node_connection(VisualShader::Type p_type, int p_from_node, int p_from_port, int p_to_node, int p_to_port) const {
+	ERR_FAIL_INDEX_V(p_type, VisualShader::TYPE_MAX, false);
+	const InternalGraph *g = &internal_graph[p_type];
+
+	for (const VisualShader::Connection &E : g->connections) {
+		if (E.from_node == p_from_node && E.from_port == p_from_port && E.to_node == p_to_node && E.to_port == p_to_port) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void VisualShaderNodeGroup::get_internal_node_connections(VisualShader::Type p_type, List<VisualShader::Connection> *r_connections) const {
+	ERR_FAIL_INDEX(p_type, VisualShader::TYPE_MAX);
+	const InternalGraph *g = &internal_graph[p_type];
+
+	for (const VisualShader::Connection &E : g->connections) {
+		r_connections->push_back(E);
+	}
+}
+
+void VisualShaderNodeGroup::set_internal_graph_offset(const Vector2 &p_offset) {
+	internal_graph_offset = p_offset;
+}
+
+Vector2 VisualShaderNodeGroup::get_internal_graph_offset() const {
+	return internal_graph_offset;
+}
+
+Dictionary VisualShaderNodeGroup::_get_internal_graph_data(VisualShader::Type p_type) const {
+	ERR_FAIL_INDEX_V(p_type, VisualShader::TYPE_MAX, Dictionary());
+	const InternalGraph *g = &internal_graph[p_type];
+
+	Dictionary data;
+
+	// Store nodes
+	Dictionary nodes_data;
+	for (const KeyValue<int, InternalNode> &E : g->nodes) {
+		Dictionary node_data;
+		node_data["node"] = E.value.node;
+		node_data["position"] = E.value.position;
+		nodes_data[E.key] = node_data;
+	}
+	data["nodes"] = nodes_data;
+
+	// Store connections
+	Array connections_data;
+	for (const VisualShader::Connection &E : g->connections) {
+		Dictionary connection_data;
+		connection_data["from_node"] = E.from_node;
+		connection_data["from_port"] = E.from_port;
+		connection_data["to_node"] = E.to_node;
+		connection_data["to_port"] = E.to_port;
+		connections_data.push_back(connection_data);
+	}
+	data["connections"] = connections_data;
+
+	data["next_node_id"] = next_internal_node_id;
+	data["graph_offset"] = internal_graph_offset;
+
+	return data;
+}
+
+void VisualShaderNodeGroup::_set_internal_graph_data(VisualShader::Type p_type, const Dictionary &p_data) {
+	ERR_FAIL_INDEX(p_type, VisualShader::TYPE_MAX);
+	InternalGraph *g = &internal_graph[p_type];
+
+	// Clear existing data
+	g->nodes.clear();
+	g->connections.clear();
+
+	if (p_data.has("next_node_id")) {
+		next_internal_node_id = p_data["next_node_id"];
+	}
+
+	if (p_data.has("graph_offset")) {
+		internal_graph_offset = p_data["graph_offset"];
+	}
+
+	// Load nodes
+	if (p_data.has("nodes")) {
+		Dictionary nodes_data = p_data["nodes"];
+		for (const Variant *key = nodes_data.next(nullptr); key != nullptr; key = nodes_data.next(key)) {
+			int node_id = *key;
+			Dictionary node_data = nodes_data[*key];
+
+			if (node_data.has("node") && node_data.has("position")) {
+				Ref<VisualShaderNode> node = node_data["node"];
+				Vector2 position = node_data["position"];
+
+				if (node.is_valid()) {
+					InternalNode internal_node;
+					internal_node.node = node;
+					internal_node.position = position;
+					g->nodes[node_id] = internal_node;
+
+					node->connect_changed(callable_mp((Resource *)this, &Resource::emit_changed));
+				}
+			}
+		}
+	}
+
+	// Load connections
+	if (p_data.has("connections")) {
+		Array connections_data = p_data["connections"];
+		for (int i = 0; i < connections_data.size(); i++) {
+			Dictionary connection_data = connections_data[i];
+			if (connection_data.has("from_node") && connection_data.has("from_port") &&
+					connection_data.has("to_node") && connection_data.has("to_port")) {
+				VisualShader::Connection connection;
+				connection.from_node = connection_data["from_node"];
+				connection.from_port = connection_data["from_port"];
+				connection.to_node = connection_data["to_node"];
+				connection.to_port = connection_data["to_port"];
+
+				g->connections.push_back(connection);
+
+				// Update connection tracking
+				if (g->nodes.has(connection.from_node) && g->nodes.has(connection.to_node)) {
+					g->nodes[connection.from_node].next_connected_nodes.push_back(connection.to_node);
+					g->nodes[connection.to_node].prev_connected_nodes.push_back(connection.from_node);
+					g->nodes[connection.from_node].node->set_output_port_connected(connection.from_port, true);
+					g->nodes[connection.to_node].node->set_input_port_connected(connection.to_port, true);
+				}
+			}
+		}
+	}
+}
+
+void VisualShaderNodeGroup::_apply_port_changes_internal() {
+	// Called when group input/output ports change - need to synchronize with internal group interface nodes
+	// This would create/update special GROUP_INPUT_NODE_ID and GROUP_OUTPUT_NODE_ID nodes
+	// For now, this is a placeholder for the interface nodes functionality
+}
+
+String VisualShaderNodeGroup::generate_code(Shader::Mode p_mode, VisualShader::Type p_type, int p_id, const String *p_input_vars, const String *p_output_vars, bool p_for_preview) const {
+	// TODO: Implement full group code generation by processing the internal graph
+	// For now, provide a simple pass-through implementation
+
+	String code;
+
+	// Simple implementation: try to match input port names to output port names
+	for (int i = 0; i < get_output_port_count(); ++i) {
+		String output_name = get_output_port_name(i);
+		for (int j = 0; j < get_input_port_count(); ++j) {
+			if (get_input_port_name(j) == output_name) {
+				code += vformat("\t%s = %s;\n", p_output_vars[i], p_input_vars[j]);
+				break;
+			}
+		}
+	}
+
+	return code;
 }
 
 void VisualShaderNodeGroup::_bind_methods() {
-	// No specific methods to bind for the basic version.
+	ClassDB::bind_method(D_METHOD("add_internal_node", "type", "node", "position", "id"), &VisualShaderNodeGroup::add_internal_node, DEFVAL(-1));
+	ClassDB::bind_method(D_METHOD("remove_internal_node", "type", "id"), &VisualShaderNodeGroup::remove_internal_node);
+	ClassDB::bind_method(D_METHOD("get_internal_node", "type", "id"), &VisualShaderNodeGroup::get_internal_node);
+	ClassDB::bind_method(D_METHOD("get_internal_node_list", "type"), &VisualShaderNodeGroup::get_internal_node_list);
+
+	ClassDB::bind_method(D_METHOD("set_internal_node_position", "type", "id", "position"), &VisualShaderNodeGroup::set_internal_node_position);
+	ClassDB::bind_method(D_METHOD("get_internal_node_position", "type", "id"), &VisualShaderNodeGroup::get_internal_node_position);
+
+	ClassDB::bind_method(D_METHOD("connect_internal_nodes", "type", "from_node", "from_port", "to_node", "to_port"), &VisualShaderNodeGroup::connect_internal_nodes);
+	ClassDB::bind_method(D_METHOD("disconnect_internal_nodes", "type", "from_node", "from_port", "to_node", "to_port"), &VisualShaderNodeGroup::disconnect_internal_nodes);
+	ClassDB::bind_method(D_METHOD("is_internal_node_connection", "type", "from_node", "from_port", "to_node", "to_port"), &VisualShaderNodeGroup::is_internal_node_connection);
+
+	ClassDB::bind_method(D_METHOD("set_internal_graph_offset", "offset"), &VisualShaderNodeGroup::set_internal_graph_offset);
+	ClassDB::bind_method(D_METHOD("get_internal_graph_offset"), &VisualShaderNodeGroup::get_internal_graph_offset);
+
+	BIND_CONSTANT(GROUP_INPUT_NODE_ID);
+	BIND_CONSTANT(GROUP_OUTPUT_NODE_ID);
 }
 
 VisualShaderNodeGroup::VisualShaderNodeGroup() {
 	simple_decl = false; // Same as GroupBase
+	next_internal_node_id = 2; // Start after reserved IDs
+	set_editable(true);
 }

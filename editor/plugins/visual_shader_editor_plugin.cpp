@@ -2648,7 +2648,7 @@ VisualShader::Type VisualShaderEditor::get_current_shader_type() const {
 
 void VisualShaderEditor::_add_input_port(int p_node, int p_port, int p_port_type, const String &p_name) {
 	VisualShader::Type type = get_current_shader_type();
-	Ref<VisualShaderNodeExpression> node = visual_shader->get_node(type, p_node);
+	Ref<VisualShaderNodeGroupBase> node = visual_shader->get_node(type, p_node);
 	if (node.is_null()) {
 		return;
 	}

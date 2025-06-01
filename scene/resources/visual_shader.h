@@ -867,8 +867,30 @@ public:
 	VisualShaderNodeGroupBase();
 };
 
-class VisualShaderNodeGroup : public VisualShaderNode {
-	GDCLASS(VisualShaderNodeGroup, VisualShaderNode);
+class VisualShaderNodeGroup : public VisualShaderNodeGroupBase {
+	GDCLASS(VisualShaderNodeGroup, VisualShaderNodeGroupBase);
+
+private:
+	// Internal graph for this group - one per shader type
+	struct InternalNode {
+		Ref<VisualShaderNode> node;
+		Vector2 position;
+		LocalVector<int> prev_connected_nodes;
+		LocalVector<int> next_connected_nodes;
+	};
+
+	struct InternalGraph {
+		RBMap<int, InternalNode> nodes;
+		List<VisualShader::Connection> connections;
+	} internal_graph[VisualShader::TYPE_MAX];
+
+	// Next available node ID for internal nodes
+	int next_internal_node_id = 2; // Start at 2 (0 reserved for group input, 1 for group output)
+
+	// Graph offset for internal graph display
+	Vector2 internal_graph_offset;
+
+	void _apply_port_changes_internal();
 
 protected:
 	static void _bind_methods();
@@ -876,33 +898,39 @@ protected:
 public:
 	virtual String get_caption() const override;
 
-	virtual int get_input_port_count() const override {
-		return 0; // No input ports for now
-	}
+	// Special node IDs for group interface
+	enum {
+		GROUP_INPUT_NODE_ID = 0,
+		GROUP_OUTPUT_NODE_ID = 1,
+	};
 
-	virtual PortType get_input_port_type(int p_port) const override {
-		return PORT_TYPE_SCALAR; // Default type
-	}
+	// Internal graph management
+	void add_internal_node(VisualShader::Type p_type, const Ref<VisualShaderNode> &p_node, const Vector2 &p_position, int p_id = -1);
+	void remove_internal_node(VisualShader::Type p_type, int p_id);
+	void set_internal_node_position(VisualShader::Type p_type, int p_id, const Vector2 &p_position);
+	Vector2 get_internal_node_position(VisualShader::Type p_type, int p_id) const;
+	Ref<VisualShaderNode> get_internal_node(VisualShader::Type p_type, int p_id) const;
+	Vector<int> get_internal_node_list(VisualShader::Type p_type) const;
+	int get_valid_internal_node_id(VisualShader::Type p_type) const;
 
-	virtual String get_input_port_name(int p_port) const override {
-		return ""; // No input ports for now
-	}
+	// Internal connection management
+	bool can_connect_internal_nodes(VisualShader::Type p_type, int p_from_node, int p_from_port, int p_to_node, int p_to_port) const;
+	Error connect_internal_nodes(VisualShader::Type p_type, int p_from_node, int p_from_port, int p_to_node, int p_to_port);
+	void disconnect_internal_nodes(VisualShader::Type p_type, int p_from_node, int p_from_port, int p_to_node, int p_to_port);
+	void connect_internal_nodes_forced(VisualShader::Type p_type, int p_from_node, int p_from_port, int p_to_node, int p_to_port);
+	bool is_internal_node_connection(VisualShader::Type p_type, int p_from_node, int p_from_port, int p_to_node, int p_to_port) const;
+	void get_internal_node_connections(VisualShader::Type p_type, List<VisualShader::Connection> *r_connections) const;
 
-	virtual int get_output_port_count() const override {
-		return 0; // No output ports for now
-	}
+	// Graph offset for internal graph editing
+	void set_internal_graph_offset(const Vector2 &p_offset);
+	Vector2 get_internal_graph_offset() const;
 
-	virtual PortType get_output_port_type(int p_port) const override {
-		return PORT_TYPE_SCALAR; // Default type
-	}
+	// Serialization support for internal graph
+	Dictionary _get_internal_graph_data(VisualShader::Type p_type) const;
+	void _set_internal_graph_data(VisualShader::Type p_type, const Dictionary &p_data);
 
-	virtual String get_output_port_name(int p_port) const override {
-		return ""; // No output ports for now
-	}
-
+	// Code generation
 	virtual String generate_code(Shader::Mode p_mode, VisualShader::Type p_type, int p_id, const String *p_input_vars, const String *p_output_vars, bool p_for_preview = false) const override;
-
-	virtual Category get_category() const override { return CATEGORY_SPECIAL; }
 
 	VisualShaderNodeGroup();
 };
