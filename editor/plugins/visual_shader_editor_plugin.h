@@ -187,6 +187,10 @@ public:
 	Ref<VisualShaderNode> get_node_for_editing(VisualShader::Type p_type, int p_id) const;
 	Vector2 get_node_position_for_editing(VisualShader::Type p_type, int p_id) const;
 
+	// Group-aware helper functions
+	Vector<int> get_node_list_for_editing(VisualShader::Type p_type) const;
+	void get_node_connections_for_editing(VisualShader::Type p_type, List<VisualShader::Connection> *r_connections) const;
+
 	VisualShaderGraphPlugin();
 };
 
@@ -231,18 +235,11 @@ class VisualShaderEditor : public ShaderEditor {
 	Button *shader_preview_button = nullptr;
 	Control *toolbar = nullptr;
 
-	// Group navigation state
-	struct GroupContext {
-		String group_name;
-		int group_node_id;
-		VisualShader::Type group_type;
-		Ref<VisualShaderNodeGroup> group_node;
-	};
-
-	Vector<GroupContext> group_navigation_stack;
-	Button *back_button = nullptr;
-	Label *navigation_breadcrumb = nullptr;
+	// Group editing state for this editor instance
 	bool editing_group = false;
+	int current_group_node_id = -1;
+	int current_group_type = -1; // VisualShader::Type as int
+	Ref<VisualShaderNodeGroup> current_group_node;
 
 	int last_to_node = -1;
 	int last_to_port = -1;
@@ -660,13 +657,11 @@ class VisualShaderEditor : public ShaderEditor {
 
 	void _help_open();
 
-	void _open_visual_shader_graph_for_group(int p_node_id);
-
-	void _back_button_pressed();
-	void _update_navigation_breadcrumb();
-	void _exit_group_editing();
-	void _enter_group_editing(int p_group_node_id, VisualShader::Type p_type);
+	void _open_group_editor_request(int p_node_id);
 	void _add_group_interface_nodes(Ref<VisualShaderNodeGroup> p_group_node);
+
+	// Group-aware helper for getting nodes
+	Ref<VisualShaderNode> get_node_for_editing(VisualShader::Type p_type, int p_id) const;
 
 protected:
 	void _notification(int p_what);
@@ -696,6 +691,9 @@ public:
 	void update_toggle_files_button();
 
 	Ref<VisualShader> get_visual_shader() const { return visual_shader; }
+
+	void refresh_group_display(int group_node_id, int group_type);
+	void setup_group_editing(const Ref<VisualShader> &p_visual_shader, int p_group_node_id, int p_group_type);
 
 	VisualShaderEditor();
 };

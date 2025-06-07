@@ -4072,6 +4072,7 @@ const VisualShaderNodeOutput::Port VisualShaderNodeOutput::ports[] = {
 };
 
 int VisualShaderNodeOutput::get_input_port_count() const {
+	print_line("[VS_GROUP_DEBUG] VisualShaderNodeOutput::get_input_port_count() - shader_mode: ", shader_mode, ", shader_type: ", shader_type);
 	int idx = 0;
 	int count = 0;
 
@@ -4082,6 +4083,7 @@ int VisualShaderNodeOutput::get_input_port_count() const {
 		idx++;
 	}
 
+	print_line("[VS_GROUP_DEBUG] VisualShaderNodeOutput::get_input_port_count() returning: ", count);
 	return count;
 }
 
@@ -4172,6 +4174,14 @@ String VisualShaderNodeOutput::generate_code(Shader::Mode p_mode, VisualShader::
 	}
 
 	return shader_code;
+}
+
+void VisualShaderNodeOutput::set_shader_type(VisualShader::Type p_shader_type) {
+	shader_type = p_shader_type;
+}
+
+void VisualShaderNodeOutput::set_shader_mode(Shader::Mode p_shader_mode) {
+	shader_mode = p_shader_mode;
 }
 
 VisualShaderNodeOutput::VisualShaderNodeOutput() {
@@ -5535,47 +5545,82 @@ Vector<int> VisualShaderNodeGroup::get_internal_node_list(VisualShader::Type p_t
 
 int VisualShaderNodeGroup::get_valid_internal_node_id(VisualShader::Type p_type) const {
 	ERR_FAIL_INDEX_V(p_type, VisualShader::TYPE_MAX, -1);
-	return next_internal_node_id;
+	const InternalGraph *g = &internal_graph[p_type];
+
+	// Find the next available ID, starting from next_internal_node_id
+	int candidate_id = next_internal_node_id;
+	while (g->nodes.has(candidate_id)) {
+		candidate_id++;
+	}
+
+	// We need to update next_internal_node_id for future calls
+	// Since this is const, we need to cast away const (this is safe for this field)
+	const_cast<VisualShaderNodeGroup *>(this)->next_internal_node_id = candidate_id + 1;
+
+	return candidate_id;
 }
 
 bool VisualShaderNodeGroup::can_connect_internal_nodes(VisualShader::Type p_type, int p_from_node, int p_from_port, int p_to_node, int p_to_port) const {
+	print_line("[VS_GROUP_DEBUG] can_connect_internal_nodes() - Type: ", p_type, ", From: ", p_from_node, ":", p_from_port, " -> To: ", p_to_node, ":", p_to_port);
+
 	ERR_FAIL_INDEX_V(p_type, VisualShader::TYPE_MAX, false);
 	const InternalGraph *g = &internal_graph[p_type];
 
+	print_line("[VS_GROUP_DEBUG] Internal graph has ", g->nodes.size(), " nodes");
+
 	if (!g->nodes.has(p_from_node)) {
+		print_line("[VS_GROUP_DEBUG] From node ", p_from_node, " not found in internal graph");
 		return false;
 	}
 
 	if (p_from_node == p_to_node) {
+		print_line("[VS_GROUP_DEBUG] Cannot connect node to itself");
 		return false;
 	}
 
-	if (p_from_port < 0 || p_from_port >= g->nodes[p_from_node].node->get_expanded_output_port_count()) {
+	int from_output_count = g->nodes[p_from_node].node->get_expanded_output_port_count();
+	print_line("[VS_GROUP_DEBUG] From node output port count: ", from_output_count);
+	if (p_from_port < 0 || p_from_port >= from_output_count) {
+		print_line("[VS_GROUP_DEBUG] From port ", p_from_port, " is out of range (0-", from_output_count - 1, ")");
 		return false;
 	}
 
 	if (!g->nodes.has(p_to_node)) {
+		print_line("[VS_GROUP_DEBUG] To node ", p_to_node, " not found in internal graph");
 		return false;
 	}
 
-	if (p_to_port < 0 || p_to_port >= g->nodes[p_to_node].node->get_input_port_count()) {
+	int to_input_count = g->nodes[p_to_node].node->get_input_port_count();
+	print_line("[VS_GROUP_DEBUG] To node input port count: ", to_input_count);
+	if (p_to_port < 0 || p_to_port >= to_input_count) {
+		print_line("[VS_GROUP_DEBUG] To port ", p_to_port, " is out of range (0-", to_input_count - 1, ")");
 		return false;
 	}
 
 	VisualShaderNode::PortType from_port_type = g->nodes[p_from_node].node->get_output_port_type(p_from_port);
 	VisualShaderNode::PortType to_port_type = g->nodes[p_to_node].node->get_input_port_type(p_to_port);
 
+	print_line("[VS_GROUP_DEBUG] Port types - From: ", from_port_type, ", To: ", to_port_type);
+
 	// Use the same port compatibility logic as VisualShader
-	if (!(MAX(0, from_port_type - (int)VisualShaderNode::PORT_TYPE_BOOLEAN) == (MAX(0, to_port_type - (int)VisualShaderNode::PORT_TYPE_BOOLEAN)))) {
+	int from_compat = MAX(0, from_port_type - (int)VisualShaderNode::PORT_TYPE_BOOLEAN);
+	int to_compat = MAX(0, to_port_type - (int)VisualShaderNode::PORT_TYPE_BOOLEAN);
+	print_line("[VS_GROUP_DEBUG] Compatibility values - From: ", from_compat, ", To: ", to_compat);
+
+	if (!(from_compat == to_compat)) {
+		print_line("[VS_GROUP_DEBUG] Port types incompatible");
 		return false;
 	}
 
+	print_line("[VS_GROUP_DEBUG] Checking existing connections (", g->connections.size(), " total)");
 	for (const VisualShader::Connection &E : g->connections) {
 		if (E.from_node == p_from_node && E.from_port == p_from_port && E.to_node == p_to_node && E.to_port == p_to_port) {
+			print_line("[VS_GROUP_DEBUG] Connection already exists");
 			return false;
 		}
 	}
 
+	print_line("[VS_GROUP_DEBUG] Connection is valid - returning true");
 	return true;
 }
 

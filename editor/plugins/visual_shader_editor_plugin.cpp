@@ -216,19 +216,28 @@ void VisualShaderGraphPlugin::_bind_methods() {
 void VisualShaderGraphPlugin::set_editor(VisualShaderEditor *p_editor) {
 	editor = p_editor;
 }
+
 void VisualShaderGraphPlugin::set_group_editing_mode(bool p_enabled, const Ref<VisualShaderNodeGroup> &p_group_node, VisualShader::Type p_type) {
+	print_line("[VS_GROUP_DEBUG] VisualShaderGraphPlugin::set_group_editing_mode() - enabled: ", p_enabled, ", group_valid: ", p_group_node.is_valid(), ", type: ", p_type);
 	editing_group = p_enabled;
-	current_group_node = p_group_node;
-	current_group_type = p_type;
-	print_line("[VS_GROUP_DEBUG] VisualShaderGraphPlugin::set_group_editing_mode() - Enabled: ", p_enabled);
+	if (p_enabled && p_group_node.is_valid()) {
+		current_group_node = p_group_node;
+		current_group_type = p_type;
+		print_line("[VS_GROUP_DEBUG] Group editing enabled with type: ", p_type);
+	} else {
+		current_group_node.unref();
+		current_group_type = VisualShader::TYPE_MAX;
+		print_line("[VS_GROUP_DEBUG] Group editing disabled");
+	}
 }
 
 Ref<VisualShaderNode> VisualShaderGraphPlugin::get_node_for_editing(VisualShader::Type p_type, int p_id) const {
+	print_line("[VS_GROUP_DEBUG] get_node_for_editing() - editing_group: ", editing_group, ", group_valid: ", current_group_node.is_valid(), ", current_group_type: ", current_group_type, ", requested_type: ", p_type);
 	if (editing_group && current_group_node.is_valid()) {
 		print_line("[VS_GROUP_DEBUG] Getting node from group internal graph - ID: ", p_id);
 		return current_group_node->get_internal_node(current_group_type, p_id);
 	} else {
-		print_line("[VS_GROUP_DEBUG] Getting node from main shader - ID: ", p_id);
+		print_line("[VS_GROUP_DEBUG] Getting node from main shader - ID: ", p_id, " (editing_group: ", editing_group, ", group_valid: ", current_group_node.is_valid(), ")");
 		return visual_shader->get_node(p_type, p_id);
 	}
 }
@@ -240,6 +249,22 @@ Vector2 VisualShaderGraphPlugin::get_node_position_for_editing(VisualShader::Typ
 	} else {
 		// Get position from the main visual shader
 		return visual_shader->get_node_position(p_type, p_id);
+	}
+}
+
+Vector<int> VisualShaderGraphPlugin::get_node_list_for_editing(VisualShader::Type p_type) const {
+	if (editing_group && current_group_node.is_valid() && p_type == current_group_type) {
+		return current_group_node->get_internal_node_list(p_type);
+	} else {
+		return visual_shader->get_node_list(p_type);
+	}
+}
+
+void VisualShaderGraphPlugin::get_node_connections_for_editing(VisualShader::Type p_type, List<VisualShader::Connection> *r_connections) const {
+	if (editing_group && current_group_node.is_valid() && p_type == current_group_type) {
+		current_group_node->get_internal_node_connections(p_type, r_connections);
+	} else {
+		visual_shader->get_node_connections(p_type, r_connections);
 	}
 }
 
@@ -568,15 +593,19 @@ void VisualShaderGraphPlugin::update_frames(VisualShader::Type p_type, int p_nod
 }
 
 void VisualShaderGraphPlugin::set_node_position(VisualShader::Type p_type, int p_id, const Vector2 &p_position) {
+	if (visual_shader->get_shader_type() != p_type || !links.has(p_id)) {
+		return;
+	}
+
+	// Update the actual position in the shader/group
 	if (editing_group && current_group_node.is_valid()) {
-		// Set position in the group's internal graph
 		current_group_node->set_internal_node_position(p_type, p_id, p_position);
 	} else {
-		// Set position in the main visual shader
-		if (visual_shader->get_shader_type() == p_type && links.has(p_id)) {
-			links[p_id].graph_element->set_position_offset(p_position);
-		}
+		visual_shader->set_node_position(p_type, p_id, p_position);
 	}
+
+	// Update the visual representation
+	links[p_id].graph_element->set_position_offset(p_position);
 }
 
 bool VisualShaderGraphPlugin::is_preview_visible(int p_id) const {
@@ -640,9 +669,19 @@ bool VisualShaderGraphPlugin::is_node_has_parameter_instances_relatively(VisualS
 }
 
 void VisualShaderGraphPlugin::add_node(VisualShader::Type p_type, int p_id, bool p_just_update, bool p_update_frames) {
-	print_line("[VS_GROUP_DEBUG] VisualShaderGraphPlugin::add_node() - Type: ", p_type, ", ID: ", p_id, ", just_update: ", p_just_update);
+	if (visual_shader.is_null()) {
+		return;
+	}
 
-	if (visual_shader.is_null() || p_type != visual_shader->get_shader_type()) {
+	// In group editing mode, we need to check the group's type, not the main shader's type
+	VisualShader::Type expected_type;
+	if (editing_group && current_group_node.is_valid()) {
+		expected_type = current_group_type;
+	} else {
+		expected_type = visual_shader->get_shader_type();
+	}
+
+	if (p_type != expected_type) {
 		return;
 	}
 	GraphEdit *graph = editor->graph;
@@ -718,6 +757,16 @@ void VisualShaderGraphPlugin::add_node(VisualShader::Type p_type, int p_id, bool
 		custom_node->_set_initialized(true);
 	}
 
+	// Check if this is an interface node in group editing mode
+	bool is_interface_node = false;
+	if (editing_group && current_group_node.is_valid()) {
+		// Interface nodes are Input/Output nodes in the group's internal graph
+		Ref<VisualShaderNodeInput> input_node = vsnode;
+		Ref<VisualShaderNodeOutput> output_node = vsnode;
+		is_interface_node = input_node.is_valid() || output_node.is_valid();
+		print_line("[VS_GROUP_DEBUG] Node ID ", p_id, " is_interface_node: ", is_interface_node, " (Input: ", input_node.is_valid(), ", Output: ", output_node.is_valid(), ")");
+	}
+
 	GraphElement *node;
 	if (is_frame) {
 		GraphFrame *frame = memnew(GraphFrame);
@@ -734,8 +783,8 @@ void VisualShaderGraphPlugin::add_node(VisualShader::Type p_type, int p_id, bool
 	}
 	node->set_name(itos(p_id));
 
-	// All nodes are closable except the output node.
-	if (p_id >= 2) {
+	// All nodes are closable except the output node and interface nodes
+	if (p_id >= 2 && !is_interface_node) {
 		vsnode->set_deletable(true);
 		node->connect("delete_request", callable_mp(editor, &VisualShaderEditor::_delete_node_request).bind(p_type, p_id), CONNECT_DEFERRED);
 	}
@@ -754,9 +803,10 @@ void VisualShaderGraphPlugin::add_node(VisualShader::Type p_type, int p_id, bool
 	}
 
 	// Add special styling for group interface nodes
-	if (is_group && (p_id == 0 || p_id == 1)) {
+	if (is_interface_node) {
 		// Special color for Group Input/Output interface nodes
 		Color interface_color = Color(0.6, 0.8, 1.0, 1.0); // Light blue
+		print_line("[VS_GROUP_DEBUG] Applying interface node styling to ID ", p_id);
 
 		Ref<StyleBoxFlat> sb_interface = editor->get_theme_stylebox("titlebar", "GraphNode")->duplicate();
 		sb_interface->set_bg_color(interface_color);
@@ -2338,6 +2388,12 @@ void VisualShaderEditor::_update_options_menu() {
 						}
 					}
 
+					Ref<VisualShaderNodeOutput> output = Object::cast_to<VisualShaderNodeOutput>(vsn.ptr());
+					if (output.is_valid()) {
+						output->set_shader_mode(visual_shader->get_mode());
+						output->set_shader_type(visual_shader->get_shader_type());
+					}
+
 					Ref<VisualShaderNodeExpression> expression = Object::cast_to<VisualShaderNodeExpression>(vsn.ptr());
 					if (expression.is_valid()) {
 						if (members_input_port_type == VisualShaderNode::PORT_TYPE_SAMPLER) {
@@ -2552,9 +2608,24 @@ void VisualShaderEditor::_update_parameters(bool p_update_refs) {
 	VisualShaderNodeParameterRef::clear_parameters(visual_shader->get_rid());
 
 	for (int t = 0; t < VisualShader::TYPE_MAX; t++) {
-		Vector<int> tnodes = visual_shader->get_node_list((VisualShader::Type)t);
+		Vector<int> tnodes;
+		VisualShader::Type type = (VisualShader::Type)t;
+
+		// Get node list based on editing mode
+		if (editing_group && current_group_node.is_valid() && type == current_group_type) {
+			tnodes = current_group_node->get_internal_node_list(type);
+		} else if (!editing_group) {
+			tnodes = visual_shader->get_node_list(type);
+		}
+		// Skip if we're in group mode but this isn't the group's type
+
 		for (int i = 0; i < tnodes.size(); i++) {
-			Ref<VisualShaderNode> vsnode = visual_shader->get_node((VisualShader::Type)t, tnodes[i]);
+			Ref<VisualShaderNode> vsnode;
+			if (editing_group && current_group_node.is_valid() && type == current_group_type) {
+				vsnode = current_group_node->get_internal_node(type, tnodes[i]);
+			} else {
+				vsnode = visual_shader->get_node(type, tnodes[i]);
+			}
 			Ref<VisualShaderNodeParameter> parameter = vsnode;
 
 			if (parameter.is_valid()) {
@@ -2604,10 +2675,22 @@ void VisualShaderEditor::_update_parameter_refs(HashSet<String> &p_deleted_names
 	for (int i = 0; i < VisualShader::TYPE_MAX; i++) {
 		VisualShader::Type type = VisualShader::Type(i);
 
-		Vector<int> nodes = visual_shader->get_node_list(type);
+		Vector<int> nodes;
+		// Get node list based on editing mode
+		if (editing_group && current_group_node.is_valid() && type == current_group_type) {
+			nodes = current_group_node->get_internal_node_list(type);
+		} else if (!editing_group) {
+			nodes = visual_shader->get_node_list(type);
+		}
+
 		for (int j = 0; j < nodes.size(); j++) {
 			if (j > 0) {
-				Ref<VisualShaderNodeParameterRef> ref = visual_shader->get_node(type, nodes[j]);
+				Ref<VisualShaderNodeParameterRef> ref;
+				if (editing_group && current_group_node.is_valid() && type == current_group_type) {
+					ref = current_group_node->get_internal_node(type, nodes[j]);
+				} else {
+					ref = visual_shader->get_node(type, nodes[j]);
+				}
 				if (ref.is_valid()) {
 					if (p_deleted_names.has(ref->get_parameter_name())) {
 						undo_redo->add_do_method(ref.ptr(), "set_parameter_name", "[None]");
@@ -2649,15 +2732,22 @@ void VisualShaderEditor::_update_graph() {
 	Vector<int> nodes;
 
 	// Get nodes and connections based on editing mode
-	if (editing_group && !group_navigation_stack.is_empty()) {
-		GroupContext &current_context = group_navigation_stack.write[group_navigation_stack.size() - 1];
-		current_context.group_node->get_internal_node_connections(type, &node_connections);
-		nodes = current_context.group_node->get_internal_node_list(type);
-		print_line("[VS_GROUP_DEBUG] _update_graph() in group mode - Found ", nodes.size(), " nodes, ", node_connections.size(), " connections");
+	if (editing_group && current_group_node.is_valid()) {
+		// Make sure graph plugin is properly configured for group editing
+		if (graph_plugin.is_valid()) {
+			graph_plugin->set_group_editing_mode(true, current_group_node, static_cast<VisualShader::Type>(current_group_type));
+		}
+
+		graph_plugin->get_node_connections_for_editing(type, &node_connections);
+		nodes = graph_plugin->get_node_list_for_editing(type);
 	} else {
-		visual_shader->get_node_connections(type, &node_connections);
-		nodes = visual_shader->get_node_list(type);
-		print_line("[VS_GROUP_DEBUG] _update_graph() in main shader mode - Found ", nodes.size(), " nodes, ", node_connections.size(), " connections");
+		// Make sure graph plugin is in main shader mode
+		if (graph_plugin.is_valid()) {
+			graph_plugin->set_group_editing_mode(false, Ref<VisualShaderNodeGroup>(), VisualShader::TYPE_MAX);
+		}
+
+		graph_plugin->get_node_connections_for_editing(type, &node_connections);
+		nodes = graph_plugin->get_node_list_for_editing(type);
 	}
 
 	graph_plugin->set_connections(node_connections);
@@ -2682,15 +2772,9 @@ void VisualShaderEditor::_update_graph() {
 		graph->connect_node(itos(from), from_idx, itos(to), to_idx);
 	}
 
-	// Attach nodes to frames - need to handle both main shader and group modes
+	// Attach nodes to frames - use group-aware retrieval
 	for (int node_id : nodes) {
-		Ref<VisualShaderNode> vsnode;
-		if (editing_group && !group_navigation_stack.is_empty()) {
-			GroupContext &current_context = group_navigation_stack.write[group_navigation_stack.size() - 1];
-			vsnode = current_context.group_node->get_internal_node(type, node_id);
-		} else {
-			vsnode = visual_shader->get_node(type, node_id);
-		}
+		Ref<VisualShaderNode> vsnode = graph_plugin->get_node_for_editing(type, node_id);
 
 		ERR_CONTINUE_MSG(vsnode.is_null(), "Node is null.");
 
@@ -2722,7 +2806,7 @@ VisualShader::Type VisualShaderEditor::get_current_shader_type() const {
 
 void VisualShaderEditor::_add_input_port(int p_node, int p_port, int p_port_type, const String &p_name) {
 	VisualShader::Type type = get_current_shader_type();
-	Ref<VisualShaderNodeGroupBase> node = visual_shader->get_node(type, p_node);
+	Ref<VisualShaderNodeGroupBase> node = get_node_for_editing(type, p_node);
 	if (node.is_null()) {
 		return;
 	}
@@ -2738,7 +2822,7 @@ void VisualShaderEditor::_add_input_port(int p_node, int p_port, int p_port_type
 
 void VisualShaderEditor::_add_output_port(int p_node, int p_port, int p_port_type, const String &p_name) {
 	VisualShader::Type type = get_current_shader_type();
-	Ref<VisualShaderNodeGroupBase> node = visual_shader->get_node(type, p_node);
+	Ref<VisualShaderNodeGroupBase> node = get_node_for_editing(type, p_node);
 	if (node.is_null()) {
 		return;
 	}
@@ -3848,16 +3932,31 @@ void VisualShaderEditor::_add_node(int p_idx, const Vector<Variant> &p_ops, cons
 	position /= graph->get_zoom();
 	saved_node_pos_dirty = false;
 
-	int id_to_use = visual_shader->get_valid_node_id(type);
-
+	int id_to_use;
 	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
-	if (p_resource_path.is_empty()) {
-		undo_redo->create_action(TTR("Add Node to Visual Shader"));
+
+	if (editing_group && current_group_node.is_valid()) {
+		// Add node to group's internal graph
+		id_to_use = current_group_node->get_valid_internal_node_id(type);
+		if (p_resource_path.is_empty()) {
+			undo_redo->create_action(TTR("Add Node to Group"));
+		} else {
+			id_to_use += p_node_idx;
+		}
+		undo_redo->add_do_method(current_group_node.ptr(), "add_internal_node", type, vsnode, position, id_to_use);
+		undo_redo->add_undo_method(current_group_node.ptr(), "remove_internal_node", type, id_to_use);
 	} else {
-		id_to_use += p_node_idx;
+		// Add node to main shader
+		id_to_use = visual_shader->get_valid_node_id(type);
+		if (p_resource_path.is_empty()) {
+			undo_redo->create_action(TTR("Add Node to Visual Shader"));
+		} else {
+			id_to_use += p_node_idx;
+		}
+		undo_redo->add_do_method(visual_shader.ptr(), "add_node", type, vsnode, position, id_to_use);
+		undo_redo->add_undo_method(visual_shader.ptr(), "remove_node", type, id_to_use);
 	}
-	undo_redo->add_do_method(visual_shader.ptr(), "add_node", type, vsnode, position, id_to_use);
-	undo_redo->add_undo_method(visual_shader.ptr(), "remove_node", type, id_to_use);
+
 	undo_redo->add_do_method(graph_plugin.ptr(), "add_node", type, id_to_use, false, true);
 	undo_redo->add_undo_method(graph_plugin.ptr(), "remove_node", type, id_to_use, false);
 
@@ -3877,15 +3976,26 @@ void VisualShaderEditor::_add_node(int p_idx, const Vector<Variant> &p_ops, cons
 
 	// A node is inserted in an already present connection.
 	if (from_node != -1 && from_slot != -1 && to_node != -1 && to_slot != -1) {
-		undo_redo->add_do_method(visual_shader.ptr(), "disconnect_nodes", type, from_node, from_slot, to_node, to_slot);
-		undo_redo->add_undo_method(visual_shader.ptr(), "connect_nodes", type, from_node, from_slot, to_node, to_slot);
+		if (editing_group && current_group_node.is_valid()) {
+			undo_redo->add_do_method(current_group_node.ptr(), "disconnect_internal_nodes", type, from_node, from_slot, to_node, to_slot);
+			undo_redo->add_undo_method(current_group_node.ptr(), "connect_internal_nodes", type, from_node, from_slot, to_node, to_slot);
+		} else {
+			undo_redo->add_do_method(visual_shader.ptr(), "disconnect_nodes", type, from_node, from_slot, to_node, to_slot);
+			undo_redo->add_undo_method(visual_shader.ptr(), "connect_nodes", type, from_node, from_slot, to_node, to_slot);
+		}
 		undo_redo->add_do_method(graph_plugin.ptr(), "disconnect_nodes", type, from_node, from_slot, to_node, to_slot);
 		undo_redo->add_undo_method(graph_plugin.ptr(), "connect_nodes", type, from_node, from_slot, to_node, to_slot);
 	}
 
 	// Create a connection from the output port of an existing node to the new one.
 	if (from_node != -1 && from_slot != -1) {
-		VisualShaderNode::PortType output_port_type = visual_shader->get_node(type, from_node)->get_output_port_type(from_slot);
+		Ref<VisualShaderNode> from_vs_node;
+		if (editing_group && current_group_node.is_valid()) {
+			from_vs_node = current_group_node->get_internal_node(type, from_node);
+		} else {
+			from_vs_node = visual_shader->get_node(type, from_node);
+		}
+		VisualShaderNode::PortType output_port_type = from_vs_node->get_output_port_type(from_slot);
 
 		if (expr && expr->is_editable()) {
 			expr->add_input_port(0, output_port_type, "input0");
@@ -3897,8 +4007,13 @@ void VisualShaderEditor::_add_node(int p_idx, const Vector<Variant> &p_ops, cons
 
 			if (created_expression_port) {
 				int _to_slot = 0;
-				undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, from_node, from_slot, _to_node, _to_slot);
-				undo_redo->add_do_method(visual_shader.ptr(), "connect_nodes", type, from_node, from_slot, _to_node, _to_slot);
+				if (editing_group && current_group_node.is_valid()) {
+					undo_redo->add_undo_method(current_group_node.ptr(), "disconnect_internal_nodes", type, from_node, from_slot, _to_node, _to_slot);
+					undo_redo->add_do_method(current_group_node.ptr(), "connect_internal_nodes", type, from_node, from_slot, _to_node, _to_slot);
+				} else {
+					undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, from_node, from_slot, _to_node, _to_slot);
+					undo_redo->add_do_method(visual_shader.ptr(), "connect_nodes", type, from_node, from_slot, _to_node, _to_slot);
+				}
 				undo_redo->add_undo_method(graph_plugin.ptr(), "disconnect_nodes", type, from_node, from_slot, _to_node, _to_slot);
 				undo_redo->add_do_method(graph_plugin.ptr(), "connect_nodes", type, from_node, from_slot, _to_node, _to_slot);
 			} else {
@@ -3917,8 +4032,13 @@ void VisualShaderEditor::_add_node(int p_idx, const Vector<Variant> &p_ops, cons
 				}
 
 				if (_to_slot >= 0) {
-					undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, from_node, from_slot, _to_node, _to_slot);
-					undo_redo->add_do_method(visual_shader.ptr(), "connect_nodes", type, from_node, from_slot, _to_node, _to_slot);
+					if (editing_group && current_group_node.is_valid()) {
+						undo_redo->add_undo_method(current_group_node.ptr(), "disconnect_internal_nodes", type, from_node, from_slot, _to_node, _to_slot);
+						undo_redo->add_do_method(current_group_node.ptr(), "connect_internal_nodes", type, from_node, from_slot, _to_node, _to_slot);
+					} else {
+						undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, from_node, from_slot, _to_node, _to_slot);
+						undo_redo->add_do_method(visual_shader.ptr(), "connect_nodes", type, from_node, from_slot, _to_node, _to_slot);
+					}
 					undo_redo->add_undo_method(graph_plugin.ptr(), "disconnect_nodes", type, from_node, from_slot, _to_node, _to_slot);
 					undo_redo->add_do_method(graph_plugin.ptr(), "connect_nodes", type, from_node, from_slot, _to_node, _to_slot);
 				}
@@ -3943,7 +4063,13 @@ void VisualShaderEditor::_add_node(int p_idx, const Vector<Variant> &p_ops, cons
 
 	// Create a connection from the new node to an input port of an existing one.
 	if (to_node != -1 && to_slot != -1) {
-		VisualShaderNode::PortType input_port_type = visual_shader->get_node(type, to_node)->get_input_port_type(to_slot);
+		Ref<VisualShaderNode> to_vs_node;
+		if (editing_group && current_group_node.is_valid()) {
+			to_vs_node = current_group_node->get_internal_node(type, to_node);
+		} else {
+			to_vs_node = visual_shader->get_node(type, to_node);
+		}
+		VisualShaderNode::PortType input_port_type = to_vs_node->get_input_port_type(to_slot);
 
 		if (expr && expr->is_editable() && input_port_type != VisualShaderNode::PORT_TYPE_SAMPLER) {
 			expr->add_output_port(0, input_port_type, "output0");
@@ -3999,11 +4125,23 @@ void VisualShaderEditor::_add_node(int p_idx, const Vector<Variant> &p_ops, cons
 					input->set_shader_type(visual_shader->get_shader_type());
 				}
 
+				// Need to setting up Output node properly before committing since `get_input_port_count` is using `mode` and `shader_type`.
+				VisualShaderNodeOutput *output = Object::cast_to<VisualShaderNodeOutput>(vsnode.ptr());
+				if (output) {
+					output->set_shader_mode(visual_shader->get_mode());
+					output->set_shader_type(visual_shader->get_shader_type());
+				}
+
 				// Attempting to connect to the first correct port.
 				for (int i = 0; i < vsnode->get_output_port_count(); i++) {
 					if (visual_shader->is_port_types_compatible(vsnode->get_output_port_type(i), input_port_type) || reroute.is_valid()) {
-						undo_redo->add_do_method(visual_shader.ptr(), "connect_nodes", type, _from_node, i, to_node, to_slot);
-						undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, _from_node, i, to_node, to_slot);
+						if (editing_group && current_group_node.is_valid()) {
+							undo_redo->add_do_method(current_group_node.ptr(), "connect_internal_nodes", type, _from_node, i, to_node, to_slot);
+							undo_redo->add_undo_method(current_group_node.ptr(), "disconnect_internal_nodes", type, _from_node, i, to_node, to_slot);
+						} else {
+							undo_redo->add_do_method(visual_shader.ptr(), "connect_nodes", type, _from_node, i, to_node, to_slot);
+							undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, _from_node, i, to_node, to_slot);
+						}
 						undo_redo->add_do_method(graph_plugin.ptr(), "connect_nodes", type, _from_node, i, to_node, to_slot);
 						undo_redo->add_undo_method(graph_plugin.ptr(), "disconnect_nodes", type, _from_node, i, to_node, to_slot);
 						break;
@@ -4190,8 +4328,13 @@ void VisualShaderEditor::_nodes_dragged() {
 	}
 
 	for (const DragOp &E : drag_buffer) {
-		undo_redo->add_do_method(visual_shader.ptr(), "set_node_position", E.type, E.node, E.to);
-		undo_redo->add_undo_method(visual_shader.ptr(), "set_node_position", E.type, E.node, E.from);
+		if (editing_group && current_group_node.is_valid()) {
+			undo_redo->add_do_method(current_group_node.ptr(), "set_internal_node_position", E.type, E.node, E.to);
+			undo_redo->add_undo_method(current_group_node.ptr(), "set_internal_node_position", E.type, E.node, E.from);
+		} else {
+			undo_redo->add_do_method(visual_shader.ptr(), "set_node_position", E.type, E.node, E.to);
+			undo_redo->add_undo_method(visual_shader.ptr(), "set_node_position", E.type, E.node, E.from);
+		}
 		undo_redo->add_do_method(graph_plugin.ptr(), "set_node_position", E.type, E.node, E.to);
 		undo_redo->add_undo_method(graph_plugin.ptr(), "set_node_position", E.type, E.node, E.from);
 	}
@@ -4222,7 +4365,14 @@ void VisualShaderEditor::_connection_request(const String &p_from, int p_from_in
 	int to = p_to.to_int();
 	bool swap = last_to_node != -1 && Input::get_singleton()->is_key_pressed(Key::CMD_OR_CTRL);
 
-	if (!visual_shader->can_connect_nodes(type, from, p_from_index, to, p_to_index)) {
+	bool can_connect;
+	if (editing_group && current_group_node.is_valid()) {
+		can_connect = current_group_node->can_connect_internal_nodes(type, from, p_from_index, to, p_to_index);
+	} else {
+		can_connect = visual_shader->can_connect_nodes(type, from, p_from_index, to, p_to_index);
+	}
+
+	if (!can_connect) {
 		return;
 	}
 
@@ -4230,18 +4380,32 @@ void VisualShaderEditor::_connection_request(const String &p_from, int p_from_in
 	undo_redo->create_action(TTR("Nodes Connected"));
 
 	List<VisualShader::Connection> conns;
-	visual_shader->get_node_connections(type, &conns);
+	if (editing_group && current_group_node.is_valid()) {
+		current_group_node->get_internal_node_connections(type, &conns);
+	} else {
+		visual_shader->get_node_connections(type, &conns);
+	}
 
 	for (const VisualShader::Connection &E : conns) {
 		if (E.to_node == to && E.to_port == p_to_index) {
-			undo_redo->add_do_method(visual_shader.ptr(), "disconnect_nodes", type, E.from_node, E.from_port, E.to_node, E.to_port);
-			undo_redo->add_undo_method(visual_shader.ptr(), "connect_nodes", type, E.from_node, E.from_port, E.to_node, E.to_port);
+			if (editing_group && current_group_node.is_valid()) {
+				undo_redo->add_do_method(current_group_node.ptr(), "disconnect_internal_nodes", type, E.from_node, E.from_port, E.to_node, E.to_port);
+				undo_redo->add_undo_method(current_group_node.ptr(), "connect_internal_nodes", type, E.from_node, E.from_port, E.to_node, E.to_port);
+			} else {
+				undo_redo->add_do_method(visual_shader.ptr(), "disconnect_nodes", type, E.from_node, E.from_port, E.to_node, E.to_port);
+				undo_redo->add_undo_method(visual_shader.ptr(), "connect_nodes", type, E.from_node, E.from_port, E.to_node, E.to_port);
+			}
 			undo_redo->add_do_method(graph_plugin.ptr(), "disconnect_nodes", type, E.from_node, E.from_port, E.to_node, E.to_port);
 			undo_redo->add_undo_method(graph_plugin.ptr(), "connect_nodes", type, E.from_node, E.from_port, E.to_node, E.to_port);
 
 			if (swap) {
-				undo_redo->add_do_method(visual_shader.ptr(), "connect_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
-				undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
+				if (editing_group && current_group_node.is_valid()) {
+					undo_redo->add_do_method(current_group_node.ptr(), "connect_internal_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
+					undo_redo->add_undo_method(current_group_node.ptr(), "disconnect_internal_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
+				} else {
+					undo_redo->add_do_method(visual_shader.ptr(), "connect_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
+					undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
+				}
 				undo_redo->add_do_method(graph_plugin.ptr(), "connect_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
 				undo_redo->add_undo_method(graph_plugin.ptr(), "disconnect_nodes", type, E.from_node, E.from_port, last_to_node, last_to_port);
 			}
@@ -4249,8 +4413,13 @@ void VisualShaderEditor::_connection_request(const String &p_from, int p_from_in
 		}
 	}
 
-	undo_redo->add_do_method(visual_shader.ptr(), "connect_nodes", type, from, p_from_index, to, p_to_index);
-	undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, from, p_from_index, to, p_to_index);
+	if (editing_group && current_group_node.is_valid()) {
+		undo_redo->add_do_method(current_group_node.ptr(), "connect_internal_nodes", type, from, p_from_index, to, p_to_index);
+		undo_redo->add_undo_method(current_group_node.ptr(), "disconnect_internal_nodes", type, from, p_from_index, to, p_to_index);
+	} else {
+		undo_redo->add_do_method(visual_shader.ptr(), "connect_nodes", type, from, p_from_index, to, p_to_index);
+		undo_redo->add_undo_method(visual_shader.ptr(), "disconnect_nodes", type, from, p_from_index, to, p_to_index);
+	}
 	undo_redo->add_do_method(graph_plugin.ptr(), "connect_nodes", type, from, p_from_index, to, p_to_index);
 	undo_redo->add_undo_method(graph_plugin.ptr(), "disconnect_nodes", type, from, p_from_index, to, p_to_index);
 
@@ -4279,8 +4448,15 @@ void VisualShaderEditor::_disconnection_request(const String &p_from, int p_from
 
 	EditorUndoRedoManager *undo_redo = EditorUndoRedoManager::get_singleton();
 	undo_redo->create_action(TTR("Nodes Disconnected"));
-	undo_redo->add_do_method(visual_shader.ptr(), "disconnect_nodes", type, from, p_from_index, to, p_to_index);
-	undo_redo->add_undo_method(visual_shader.ptr(), "connect_nodes", type, from, p_from_index, to, p_to_index);
+
+	if (editing_group && current_group_node.is_valid()) {
+		undo_redo->add_do_method(current_group_node.ptr(), "disconnect_internal_nodes", type, from, p_from_index, to, p_to_index);
+		undo_redo->add_undo_method(current_group_node.ptr(), "connect_internal_nodes", type, from, p_from_index, to, p_to_index);
+	} else {
+		undo_redo->add_do_method(visual_shader.ptr(), "disconnect_nodes", type, from, p_from_index, to, p_to_index);
+		undo_redo->add_undo_method(visual_shader.ptr(), "connect_nodes", type, from, p_from_index, to, p_to_index);
+	}
+
 	undo_redo->add_do_method(graph_plugin.ptr(), "disconnect_nodes", type, from, p_from_index, to, p_to_index);
 	undo_redo->add_undo_method(graph_plugin.ptr(), "connect_nodes", type, from, p_from_index, to, p_to_index);
 	undo_redo->add_do_method(graph_plugin.ptr(), "update_node", (int)type, to);
@@ -5085,6 +5261,8 @@ void VisualShaderEditor::_graph_gui_input(const Ref<InputEvent> &p_event) {
 
 	// Double click on a node to edit a group node
 	if (mb.is_valid() && mb->is_pressed() && mb->get_button_index() == MouseButton::LEFT && mb->is_double_click()) {
+		print_line("[VS_GROUP_DEBUG] Double-click detected! Checking for group nodes...");
+
 		// Detect double-click on VisualShaderNodeGroup
 		for (int i = 0; i < graph->get_child_count(); i++) {
 			GraphElement *graph_element = Object::cast_to<GraphElement>(graph->get_child(i));
@@ -5092,157 +5270,142 @@ void VisualShaderEditor::_graph_gui_input(const Ref<InputEvent> &p_event) {
 				continue;
 			}
 			int id = String(graph_element->get_name()).to_int();
+			print_line("[VS_GROUP_DEBUG] Checking graph element: ", graph_element->get_name(), " (ID: ", id, ")");
+
 			Ref<VisualShaderNode> vsnode = visual_shader->get_node(type, id);
 			Ref<VisualShaderNodeGroup> group_node = Object::cast_to<VisualShaderNodeGroup>(vsnode.ptr());
-			if (vsnode.is_valid() && group_node.is_valid()) {
-				// Open new visual shader graph for the group
-				_open_visual_shader_graph_for_group(id);
-				return; // Exit after handling the double-click
+
+			if (vsnode.is_valid()) {
+				print_line("[VS_GROUP_DEBUG] Node is valid, type: ", vsnode->get_class());
+				if (group_node.is_valid()) {
+					print_line("[VS_GROUP_DEBUG] Found group node! Opening group editor for ID: ", id);
+					// Open new visual shader graph for the group
+					_open_group_editor_request(id);
+					return; // Exit after handling the double-click
+				}
+			} else {
+				print_line("[VS_GROUP_DEBUG] Node with ID ", id, " is not valid");
 			}
 		}
+		print_line("[VS_GROUP_DEBUG] No group nodes found to double-click");
 	}
 }
 
-void VisualShaderEditor::_open_visual_shader_graph_for_group(int p_node_id) {
-	VisualShader::Type type = get_current_shader_type();
-	Ref<VisualShaderNode> vsnode = visual_shader->get_node(type, p_node_id);
-	Ref<VisualShaderNodeGroup> group_node = Object::cast_to<VisualShaderNodeGroup>(vsnode.ptr());
+void VisualShaderEditor::_open_group_editor_request(int p_node_id) {
+	print_line("[VS_GROUP_DEBUG] _open_group_editor_request called for node ID: ", p_node_id);
 
-	if (group_node.is_null()) {
-		return;
+	if (ShaderEditorPlugin::get_singleton()) {
+		int current_editor_index = ShaderEditorPlugin::get_singleton()->find_shader_editor(this);
+		print_line("[VS_GROUP_DEBUG] Current editor index: ", current_editor_index);
+
+		if (current_editor_index >= 0) {
+			print_line("[VS_GROUP_DEBUG] Calling ShaderEditorPlugin::open_group_editor");
+			ShaderEditorPlugin::get_singleton()->open_group_editor(
+					current_editor_index,
+					p_node_id,
+					static_cast<int>(get_current_shader_type()));
+		} else {
+			print_line("[VS_GROUP_DEBUG] ERROR: Invalid editor index");
+		}
+	} else {
+		print_line("[VS_GROUP_DEBUG] ERROR: ShaderEditorPlugin singleton is null");
 	}
-
-	_enter_group_editing(p_node_id, type);
 }
 
-void VisualShaderEditor::_enter_group_editing(int p_group_node_id, VisualShader::Type p_type) {
-	print_line("[VS_GROUP_DEBUG] _enter_group_editing() - Group ID: ", p_group_node_id, ", Type: ", p_type);
-
-	Ref<VisualShaderNode> vsnode = visual_shader->get_node(p_type, p_group_node_id);
-	Ref<VisualShaderNodeGroup> group_node = Object::cast_to<VisualShaderNodeGroup>(vsnode.ptr());
-
-	if (group_node.is_null()) {
-		print_line("[VS_GROUP_DEBUG] ERROR: group_node is null for ID ", p_group_node_id);
-		return;
-	}
-
-	print_line("[VS_GROUP_DEBUG] Successfully cast to group node, proceeding with group editing");
-
-	// Save current context
-	GroupContext context;
-	context.group_name = "Group " + itos(p_group_node_id);
-	context.group_node_id = p_group_node_id;
-	context.group_type = p_type;
-	context.group_node = group_node;
-
-	group_navigation_stack.push_back(context);
+void VisualShaderEditor::setup_group_editing(const Ref<VisualShader> &p_visual_shader, int p_group_node_id, int p_group_type) {
+	// Store group editing state
 	editing_group = true;
+	current_group_node_id = p_group_node_id;
+	current_group_type = p_group_type;
 
-	// Set graph plugin to group editing mode
-	graph_plugin->set_group_editing_mode(true, group_node, get_current_shader_type());
+	VisualShader::Type type = static_cast<VisualShader::Type>(p_group_type);
+	Ref<VisualShaderNode> vsnode = p_visual_shader->get_node(type, p_group_node_id);
+	current_group_node = Object::cast_to<VisualShaderNodeGroup>(vsnode.ptr());
 
-	// Clear the current graph
+	if (current_group_node.is_null()) {
+		ERR_PRINT("Failed to setup group editing: invalid group node");
+		return;
+	}
+
+	// Set up the visual shader and graph plugin for group editing
+	visual_shader = p_visual_shader;
+
+	// CRITICAL FIX: Register the main shader with the graph plugin
+	// Group editors need access to the main VisualShader for visual rendering,
+	// even though they operate on the group's internal node data
+	graph_plugin->register_shader(visual_shader.ptr());
+
+	graph_plugin->set_group_editing_mode(true, current_group_node, type);
 	graph_plugin->clear_links();
 
-	print_line("[VS_GROUP_DEBUG] About to add group interface nodes");
-	// Add special Group Input and Output nodes
-	_add_group_interface_nodes(group_node);
+	// Add group interface nodes
+	_add_group_interface_nodes(current_group_node);
 
-	_update_navigation_breadcrumb();
-	back_button->set_visible(true);
+	// Update the graph display
 	_update_graph();
-	print_line("[VS_GROUP_DEBUG] _enter_group_editing() completed");
+}
+
+void VisualShaderEditor::refresh_group_display(int group_node_id, int group_type) {
+	// If this editor is displaying the modified group, refresh it
+	if (editing_group &&
+			current_group_node_id == group_node_id &&
+			current_group_type == group_type) {
+		_update_graph();
+	}
+
+	// Also update the graph plugin to reflect any changes
+	if (graph_plugin.is_valid()) {
+		graph_plugin->update_node_deferred(static_cast<VisualShader::Type>(group_type), group_node_id);
+	}
 }
 
 void VisualShaderEditor::_add_group_interface_nodes(Ref<VisualShaderNodeGroup> p_group_node) {
-	print_line("[VS_GROUP_DEBUG] _add_group_interface_nodes() - START");
 	VisualShader::Type current_type = get_current_shader_type();
-	print_line("[VS_GROUP_DEBUG] Current shader type: ", current_type);
 
-	// Create and add Group Input node (ID 0)
-	print_line("[VS_GROUP_DEBUG] Checking for existing Group Input node (ID 0)");
-	if (p_group_node->get_internal_node(current_type, 0).is_null()) {
-		print_line("[VS_GROUP_DEBUG] Creating new Group Input node");
-		// Create a special input interface node
+	// Use proper ID generation instead of fixed IDs
+	int input_id = p_group_node->get_valid_internal_node_id(current_type);
+	int output_id = p_group_node->get_valid_internal_node_id(current_type);
+
+	// Check if we need to create interface nodes
+	Vector<int> existing_nodes = p_group_node->get_internal_node_list(current_type);
+	bool has_input = false;
+	bool has_output = false;
+
+	for (int node_id : existing_nodes) {
+		Ref<VisualShaderNode> node = p_group_node->get_internal_node(current_type, node_id);
+		if (Object::cast_to<VisualShaderNodeGroupInput>(node.ptr())) {
+			has_input = true;
+		} else if (Object::cast_to<VisualShaderNodeGroupOutput>(node.ptr())) {
+			has_output = true;
+		}
+	}
+
+	// Create Group Input node if needed
+	if (!has_input) {
 		Ref<VisualShaderNodeGroupInput> input_interface = memnew(VisualShaderNodeGroupInput);
 		input_interface->set_group_node(p_group_node);
-
-		print_line("[VS_GROUP_DEBUG] Adding Group Input node to internal graph");
-		// Add it to the group's internal graph
-		p_group_node->add_internal_node(current_type, input_interface, Vector2(-200, 0), 0);
-	} else {
-		print_line("[VS_GROUP_DEBUG] Group Input node already exists - updating reference");
-		// Update the existing node's group reference
-		Ref<VisualShaderNodeGroupInput> existing_input = p_group_node->get_internal_node(current_type, 0);
-		if (existing_input.is_valid()) {
-			existing_input->set_group_node(p_group_node);
-		}
+		p_group_node->add_internal_node(current_type, input_interface, Vector2(-200, 0), input_id);
 	}
 
-	// Create and add Group Output node (ID 1)
-	print_line("[VS_GROUP_DEBUG] Checking for existing Group Output node (ID 1)");
-	if (p_group_node->get_internal_node(current_type, 1).is_null()) {
-		print_line("[VS_GROUP_DEBUG] Creating new Group Output node");
-		// Create a special output interface node
+	// Create Group Output node if needed
+	if (!has_output) {
 		Ref<VisualShaderNodeGroupOutput> output_interface = memnew(VisualShaderNodeGroupOutput);
 		output_interface->set_group_node(p_group_node);
+		p_group_node->add_internal_node(current_type, output_interface, Vector2(200, 0), output_id);
+	}
 
-		print_line("[VS_GROUP_DEBUG] Adding Group Output node to internal graph");
-		// Add it to the group's internal graph
-		p_group_node->add_internal_node(current_type, output_interface, Vector2(200, 0), 1);
+	// After adding interface nodes, mark shader as modified
+	if (visual_shader.is_valid()) {
+		visual_shader->emit_changed();
+	}
+}
+
+Ref<VisualShaderNode> VisualShaderEditor::get_node_for_editing(VisualShader::Type p_type, int p_id) const {
+	if (editing_group && current_group_node.is_valid() && p_type == current_group_type) {
+		return current_group_node->get_internal_node(p_type, p_id);
 	} else {
-		print_line("[VS_GROUP_DEBUG] Group Output node already exists - updating reference");
-		// Update the existing node's group reference
-		Ref<VisualShaderNodeGroupOutput> existing_output = p_group_node->get_internal_node(current_type, 1);
-		if (existing_output.is_valid()) {
-			existing_output->set_group_node(p_group_node);
-		}
+		return visual_shader->get_node(p_type, p_id);
 	}
-
-	print_line("[VS_GROUP_DEBUG] _add_group_interface_nodes() - END");
-}
-
-void VisualShaderEditor::_exit_group_editing() {
-	if (group_navigation_stack.is_empty()) {
-		return;
-	}
-
-	group_navigation_stack.remove_at(group_navigation_stack.size() - 1);
-
-	if (group_navigation_stack.is_empty()) {
-		editing_group = false;
-		back_button->set_visible(false);
-
-		// Reset graph plugin to main shader mode
-		graph_plugin->set_group_editing_mode(false);
-
-		// Return to main shader view
-		_update_graph();
-	} else {
-		// Return to parent group
-		GroupContext &parent_context = group_navigation_stack.write[group_navigation_stack.size() - 1];
-
-		// Set graph plugin to parent group mode
-		graph_plugin->set_group_editing_mode(true, parent_context.group_node, parent_context.group_type);
-
-		_enter_group_editing(parent_context.group_node_id, parent_context.group_type);
-	}
-
-	_update_navigation_breadcrumb();
-}
-
-void VisualShaderEditor::_back_button_pressed() {
-	_exit_group_editing();
-}
-
-void VisualShaderEditor::_update_navigation_breadcrumb() {
-	String breadcrumb_text = "Main Shader";
-
-	for (int i = 0; i < group_navigation_stack.size(); i++) {
-		breadcrumb_text += " → " + group_navigation_stack[i].group_name;
-	}
-
-	navigation_breadcrumb->set_text(breadcrumb_text);
 }
 
 void VisualShaderEditor::_show_members_dialog(bool at_mouse_pos, VisualShaderNode::PortType p_input_port_type, VisualShaderNode::PortType p_output_port_type) {
@@ -5548,6 +5711,13 @@ void VisualShaderEditor::_node_changed(int p_id) {
 
 	if (is_visible_in_tree()) {
 		_update_graph();
+	}
+
+	// If this is a group editor, notify the shader plugin about changes
+	if (editing_group && ShaderEditorPlugin::get_singleton()) {
+		ShaderEditorPlugin::get_singleton()->notify_group_changed(
+				current_group_node_id,
+				current_group_type);
 	}
 }
 
@@ -6657,10 +6827,7 @@ void VisualShaderEditor::_bind_methods() {
 	ClassDB::bind_method("_update_parameter", &VisualShaderEditor::_update_parameter);
 	ClassDB::bind_method("_update_next_previews", &VisualShaderEditor::_update_next_previews);
 	ClassDB::bind_method("_update_current_param", &VisualShaderEditor::_update_current_param);
-	ClassDB::bind_method("_back_button_pressed", &VisualShaderEditor::_back_button_pressed);
-	ClassDB::bind_method("_update_navigation_breadcrumb", &VisualShaderEditor::_update_navigation_breadcrumb);
-	ClassDB::bind_method("_exit_group_editing", &VisualShaderEditor::_exit_group_editing);
-	ClassDB::bind_method("_enter_group_editing", &VisualShaderEditor::_enter_group_editing);
+	// Old group editing method bindings removed - now handled by separate editor instances
 }
 
 VisualShaderEditor::VisualShaderEditor() {
@@ -6857,23 +7024,7 @@ VisualShaderEditor::VisualShaderEditor() {
 	graph->connect("graph_elements_linked_to_frame_request", callable_mp(this, &VisualShaderEditor::_nodes_linked_to_frame_request));
 	graph->connect("frame_rect_changed", callable_mp(this, &VisualShaderEditor::_frame_rect_changed));
 
-	back_button = memnew(Button);
-	back_button->set_flat(true);
-	back_button->set_text("← Back");
-	back_button->set_visible(false);
-	back_button->connect("pressed", callable_mp(this, &VisualShaderEditor::_back_button_pressed));
-	toolbar->add_child(back_button);
-	toolbar->move_child(back_button, 0);
-
-	navigation_breadcrumb = memnew(Label);
-	navigation_breadcrumb->set_text("Main Shader");
-	navigation_breadcrumb->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
-	toolbar->add_child(navigation_breadcrumb);
-	toolbar->move_child(navigation_breadcrumb, 1);
-
-	VSeparator *nav_separator = memnew(VSeparator);
-	toolbar->add_child(nav_separator);
-	toolbar->move_child(nav_separator, 2);
+	// Group editing UI elements removed - now handled by separate editor instances
 
 	varying_button = memnew(MenuButton);
 	varying_button->set_text(TTR("Manage Varyings"));

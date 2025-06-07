@@ -54,6 +54,14 @@ class ShaderEditorPlugin : public EditorPlugin {
 		ShaderEditor *shader_editor = nullptr;
 		String path;
 		String name;
+
+		// New fields for group hierarchy
+		bool is_group_editor = false;
+		int group_node_id = -1;
+		int group_type = -1; // VisualShader::Type as int
+		int parent_editor_index = -1; // Index of parent editor in edited_shaders
+		Vector<int> child_editor_indices; // Indices of child group editors
+		int hierarchy_level = 0; // For indentation (0 = main shader)
 	};
 
 	LocalVector<EditedShader> edited_shaders;
@@ -99,6 +107,8 @@ class ShaderEditorPlugin : public EditorPlugin {
 	ShaderCreateDialog *shader_create_dialog = nullptr;
 
 	float text_shader_zoom_factor = 1.0f;
+
+	static ShaderEditorPlugin *singleton;
 
 	Ref<Resource> _get_current_shader();
 	void _update_shader_list();
@@ -149,5 +159,14 @@ public:
 	virtual void save_external_data() override;
 	virtual void apply_changes() override;
 
+	// New methods for group editing
+	void open_group_editor(int parent_editor_index, int group_node_id, int group_type);
+	int find_shader_editor(ShaderEditor *p_editor);
+	void notify_group_changed(int group_node_id, int group_type);
+	void close_group_editors_recursively(int editor_index);
+
+	static ShaderEditorPlugin *get_singleton() { return singleton; }
+
 	ShaderEditorPlugin();
+	~ShaderEditorPlugin();
 };

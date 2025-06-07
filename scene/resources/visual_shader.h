@@ -585,6 +585,9 @@ public:
 
 	virtual String generate_code(Shader::Mode p_mode, VisualShader::Type p_type, int p_id, const String *p_input_vars, const String *p_output_vars, bool p_for_preview = false) const override;
 
+	void set_shader_type(VisualShader::Type p_shader_type);
+	void set_shader_mode(Shader::Mode p_shader_mode);
+
 	virtual Category get_category() const override { return CATEGORY_OUTPUT; }
 
 	VisualShaderNodeOutput();

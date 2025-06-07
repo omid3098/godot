@@ -45,6 +45,9 @@
 #include "scene/gui/item_list.h"
 #include "scene/gui/tab_container.h"
 #include "scene/gui/texture_rect.h"
+#include "scene/resources/visual_shader.h"
+
+ShaderEditorPlugin *ShaderEditorPlugin::singleton = nullptr;
 
 Ref<Resource> ShaderEditorPlugin::_get_current_shader() {
 	int index = shader_tabs->get_current_tab();
@@ -57,51 +60,84 @@ Ref<Resource> ShaderEditorPlugin::_get_current_shader() {
 }
 
 void ShaderEditorPlugin::_update_shader_list() {
+	print_line("[VS_GROUP_DEBUG] _update_shader_list() - clearing list, total shaders: ", edited_shaders.size());
 	shader_list->clear();
-	for (EditedShader &edited_shader : edited_shaders) {
+	for (int i = 0; i < edited_shaders.size(); i++) {
+		EditedShader &edited_shader = edited_shaders[i];
 		Ref<Resource> shader = edited_shader.shader;
 		if (shader.is_null()) {
 			shader = edited_shader.shader_inc;
 		}
 
-		String path = shader->get_path();
-		String text = path.get_file();
-		if (text.is_empty()) {
-			// This appears for newly created built-in shaders before saving the scene.
-			text = TTR("[unsaved]");
-		} else if (shader->is_built_in()) {
-			const String &shader_name = shader->get_name();
-			if (!shader_name.is_empty()) {
-				text = vformat("%s (%s)", shader_name, text.get_slice("::", 0));
+		String text;
+		Ref<Texture2D> icon;
+
+		if (edited_shader.is_group_editor) {
+			String indent = "";
+			for (int level = 0; level < edited_shader.hierarchy_level; level++) {
+				indent += "  ";
+			}
+			text = indent + "Group " + itos(edited_shader.group_node_id);
+
+			if (edited_shader.hierarchy_level == 1) {
+				icon = shader_list->get_editor_theme_icon(SNAME("PackedScene"));
+			} else {
+				icon = shader_list->get_editor_theme_icon(SNAME("Node"));
+			}
+		} else {
+			String path = shader->get_path();
+			text = path.get_file();
+			if (text.is_empty()) {
+				// This appears for newly created built-in shaders before saving the scene.
+				text = TTR("[unsaved]");
+			} else if (shader->is_built_in()) {
+				const String &shader_name = shader->get_name();
+				if (!shader_name.is_empty()) {
+					text = vformat("%s (%s)", shader_name, text.get_slice("::", 0));
+				}
+			}
+
+			String _class = shader->get_class();
+			if (_class == "VisualShader") {
+				icon = shader_list->get_editor_theme_icon(SNAME("VisualScript")); // Visual shader icon
+			} else if (!shader_list->has_theme_icon(_class, EditorStringName(EditorIcons))) {
+				icon = shader_list->get_editor_theme_icon(SNAME("TextFile")); // Fallback for other shaders
+			} else {
+				icon = shader_list->get_editor_theme_icon(_class);
 			}
 		}
 
 		// When shader is deleted in filesystem dock, need this to correctly close shader editor.
-		edited_shader.path = path;
+		if (!edited_shader.is_group_editor && shader.is_valid()) {
+			edited_shader.path = shader->get_path();
+		}
 
 		bool unsaved = false;
 		if (edited_shader.shader_editor) {
 			unsaved = edited_shader.shader_editor->is_unsaved();
 		}
-		// TODO: Handle visual shaders too.
 
 		if (unsaved) {
 			text += "(*)";
 		}
 
-		String _class = shader->get_class();
-		if (!shader_list->has_theme_icon(_class, EditorStringName(EditorIcons))) {
-			_class = "TextFile";
-		}
-		Ref<Texture2D> icon = shader_list->get_editor_theme_icon(_class);
-
 		shader_list->add_item(text, icon);
-		shader_list->set_item_tooltip(-1, path);
+		print_line("[VS_GROUP_DEBUG] Added to shader list [", i, "]: ", text, " (is_group_editor: ", edited_shader.is_group_editor, ")");
+
+		String tooltip;
+		if (edited_shader.is_group_editor) {
+			tooltip = "Group editor for node " + itos(edited_shader.group_node_id);
+		} else if (shader.is_valid()) {
+			tooltip = shader->get_path();
+		}
+		shader_list->set_item_tooltip(-1, tooltip);
 		edited_shader.name = text;
 	}
 
 	if (shader_tabs->get_tab_count()) {
-		shader_list->select(shader_tabs->get_current_tab());
+		int current_tab = shader_tabs->get_current_tab();
+		print_line("[VS_GROUP_DEBUG] _update_shader_list() selecting tab: ", current_tab);
+		shader_list->select(current_tab);
 	}
 
 	_set_file_specific_items_disabled(edited_shaders.is_empty());
@@ -134,6 +170,7 @@ void ShaderEditorPlugin::_move_shader_tab(int p_from, int p_to) {
 }
 
 void ShaderEditorPlugin::edit(Object *p_object) {
+	print_line("[VS_GROUP_DEBUG] edit() called with object: ", p_object ? p_object->get_class() : "null");
 	if (!p_object) {
 		return;
 	}
@@ -143,7 +180,7 @@ void ShaderEditorPlugin::edit(Object *p_object) {
 	ShaderInclude *si = Object::cast_to<ShaderInclude>(p_object);
 	if (si != nullptr) {
 		for (uint32_t i = 0; i < edited_shaders.size(); i++) {
-			if (edited_shaders[i].shader_inc.ptr() == si) {
+			if (edited_shaders[i].shader_inc.ptr() == si && !edited_shaders[i].is_group_editor) {
 				shader_tabs->set_current_tab(i);
 				shader_list->select(i);
 				_switch_to_editor(edited_shaders[i].shader_editor);
@@ -158,14 +195,19 @@ void ShaderEditorPlugin::edit(Object *p_object) {
 		shader_tabs->add_child(es.shader_editor);
 	} else {
 		Shader *s = Object::cast_to<Shader>(p_object);
+		print_line("[VS_GROUP_DEBUG] Looking for existing shader editor for shader: ", s);
+		print_line("[VS_GROUP_DEBUG] Current edited_shaders count: ", edited_shaders.size());
 		for (uint32_t i = 0; i < edited_shaders.size(); i++) {
-			if (edited_shaders[i].shader.ptr() == s) {
+			print_line("[VS_GROUP_DEBUG] Editor [", i, "]: shader=", edited_shaders[i].shader.ptr(), " is_group_editor=", edited_shaders[i].is_group_editor);
+			if (edited_shaders[i].shader.ptr() == s && !edited_shaders[i].is_group_editor) {
+				print_line("[VS_GROUP_DEBUG] Found existing main shader editor, switching to it");
 				shader_tabs->set_current_tab(i);
 				shader_list->select(i);
 				_switch_to_editor(edited_shaders[i].shader_editor);
 				return;
 			}
 		}
+		print_line("[VS_GROUP_DEBUG] No existing main shader editor found, creating new one");
 		es.shader = Ref<Shader>(s);
 		Ref<VisualShader> vs = es.shader;
 		if (vs.is_valid()) {
@@ -294,7 +336,7 @@ void ShaderEditorPlugin::get_window_layout(Ref<ConfigFile> p_layout) {
 	String selected_shader;
 	for (int i = 0; i < shader_tabs->get_tab_count(); i++) {
 		EditedShader edited_shader = edited_shaders[i];
-		if (edited_shader.shader_editor) {
+		if (edited_shader.shader_editor && !edited_shader.is_group_editor) {
 			String shader_path;
 			if (edited_shader.shader.is_valid()) {
 				shader_path = edited_shader.shader->get_path();
@@ -371,17 +413,26 @@ void ShaderEditorPlugin::apply_changes() {
 }
 
 void ShaderEditorPlugin::_shader_selected(int p_index) {
+	print_line("[VS_GROUP_DEBUG] _shader_selected called with index: ", p_index);
+
 	if (p_index >= (int)edited_shaders.size()) {
+		print_line("[VS_GROUP_DEBUG] Index out of bounds, returning");
 		return;
 	}
 
-	if (edited_shaders[p_index].shader_editor) {
-		_switch_to_editor(edited_shaders[p_index].shader_editor);
-		edited_shaders[p_index].shader_editor->validate_script();
+	EditedShader &selected_shader = edited_shaders[p_index];
+	print_line("[VS_GROUP_DEBUG] Selected shader is_group_editor: ", selected_shader.is_group_editor);
+
+	if (selected_shader.shader_editor) {
+		print_line("[VS_GROUP_DEBUG] Switching to editor for index: ", p_index);
+		_switch_to_editor(selected_shader.shader_editor);
+		selected_shader.shader_editor->validate_script();
 	}
 
 	shader_tabs->set_current_tab(p_index);
 	shader_list->select(p_index);
+
+	print_line("[VS_GROUP_DEBUG] _shader_selected completed for index: ", p_index);
 }
 
 void ShaderEditorPlugin::_shader_list_clicked(int p_item, Vector2 p_local_mouse_pos, MouseButton p_mouse_button_index) {
@@ -449,7 +500,40 @@ void ShaderEditorPlugin::_make_script_list_context_menu() {
 }
 
 void ShaderEditorPlugin::_close_shader(int p_index) {
+	print_line("[VS_GROUP_DEBUG] _close_shader called for index: ", p_index);
+	if (p_index < edited_shaders.size()) {
+		print_line("[VS_GROUP_DEBUG] Closing shader: ", edited_shaders[p_index].name, " (is_group_editor: ", edited_shaders[p_index].is_group_editor, ")");
+	}
+
 	ERR_FAIL_INDEX(p_index, shader_tabs->get_tab_count());
+
+	EditedShader &closing_shader = edited_shaders[p_index];
+
+	// If closing a group editor, update parent-child relationships
+	if (closing_shader.is_group_editor) {
+		// Remove from parent's child list
+		if (closing_shader.parent_editor_index >= 0 &&
+				closing_shader.parent_editor_index < edited_shaders.size()) {
+			EditedShader &parent = edited_shaders[closing_shader.parent_editor_index];
+			parent.child_editor_indices.erase(p_index);
+
+			// Update indices in parent that are greater than p_index
+			for (int &child_index : parent.child_editor_indices) {
+				if (child_index > p_index) {
+					child_index--;
+				}
+			}
+		}
+	}
+
+	// Close all child group editors recursively (in reverse order to avoid index shifts)
+	Vector<int> children_to_close = closing_shader.child_editor_indices;
+	for (int i = children_to_close.size() - 1; i >= 0; i--) {
+		int child_index = children_to_close[i];
+		if (child_index < edited_shaders.size() && child_index > p_index) {
+			_close_shader(child_index);
+		}
+	}
 
 	Control *c = shader_tabs->get_tab_control(p_index);
 	VisualShaderEditor *vs_editor = Object::cast_to<VisualShaderEditor>(c);
@@ -466,6 +550,19 @@ void ShaderEditorPlugin::_close_shader(int p_index) {
 
 	memdelete(c);
 	edited_shaders.remove_at(p_index);
+
+	// Update all parent-child index references after removal
+	for (EditedShader &es : edited_shaders) {
+		if (es.parent_editor_index > p_index) {
+			es.parent_editor_index--;
+		}
+		for (int &child_index : es.child_editor_indices) {
+			if (child_index > p_index) {
+				child_index--;
+			}
+		}
+	}
+
 	_update_shader_list();
 	EditorUndoRedoManager::get_singleton()->clear_history(); // To prevent undo on deleted graphs.
 
@@ -478,6 +575,7 @@ void ShaderEditorPlugin::_close_shader(int p_index) {
 }
 
 void ShaderEditorPlugin::_close_builtin_shaders_from_scene(const String &p_scene) {
+	print_line("[VS_GROUP_DEBUG] _close_builtin_shaders_from_scene called for scene: ", p_scene);
 	for (uint32_t i = 0; i < edited_shaders.size();) {
 		Ref<Shader> &shader = edited_shaders[i].shader;
 		if (shader.is_valid()) {
@@ -508,6 +606,7 @@ void ShaderEditorPlugin::_resource_saved(Object *obj) {
 }
 
 void ShaderEditorPlugin::_menu_item_pressed(int p_index) {
+	print_line("[VS_GROUP_DEBUG] _menu_item_pressed called with index: ", p_index);
 	switch (p_index) {
 		case FILE_MENU_NEW: {
 			String base_path = FileSystemDock::get_singleton()->get_current_path().get_base_dir();
@@ -597,6 +696,7 @@ void ShaderEditorPlugin::_menu_item_pressed(int p_index) {
 			_close_shader(shader_tabs->get_current_tab());
 		} break;
 		case FILE_MENU_CLOSE_ALL: {
+			print_line("[VS_GROUP_DEBUG] FILE_MENU_CLOSE_ALL triggered! This is what's closing all editors!");
 			while (shader_tabs->get_tab_count() > 0) {
 				_close_shader(0);
 			}
@@ -864,6 +964,134 @@ void ShaderEditorPlugin::_set_file_specific_items_disabled(bool p_disabled) {
 	file_popup_menu->set_item_disabled(file_popup_menu->get_item_index(FILE_MENU_CLOSE), p_disabled);
 }
 
+void ShaderEditorPlugin::open_group_editor(int parent_editor_index, int group_node_id, int group_type) {
+	print_line("[VS_GROUP_DEBUG] ShaderEditorPlugin::open_group_editor called! Parent index: ", parent_editor_index, ", Node ID: ", group_node_id, ", Type: ", group_type);
+
+	ERR_FAIL_INDEX(parent_editor_index, edited_shaders.size());
+
+	EditedShader &parent_shader = edited_shaders[parent_editor_index];
+	ERR_FAIL_COND(!parent_shader.shader.is_valid());
+
+	Ref<VisualShader> vs = parent_shader.shader;
+	ERR_FAIL_COND(vs.is_null());
+
+	print_line("[VS_GROUP_DEBUG] Parent shader is valid, checking for existing group editor...");
+
+	// Check if group editor already exists
+	for (int i = 0; i < edited_shaders.size(); i++) {
+		EditedShader &es = edited_shaders[i];
+		if (es.is_group_editor &&
+				es.parent_editor_index == parent_editor_index &&
+				es.group_node_id == group_node_id &&
+				es.group_type == group_type) {
+			print_line("[VS_GROUP_DEBUG] Group editor already exists, switching to it");
+			// Group editor already open, just switch to it
+			shader_tabs->set_current_tab(i);
+			shader_list->select(i);
+			_switch_to_editor(es.shader_editor);
+			return;
+		}
+	}
+
+	print_line("[VS_GROUP_DEBUG] Creating new group editor...");
+
+	// Create new group editor
+	EditedShader group_es;
+	group_es.shader = vs; // Same shader reference
+	group_es.is_group_editor = true;
+	group_es.group_node_id = group_node_id;
+	group_es.group_type = group_type;
+	group_es.parent_editor_index = parent_editor_index;
+	group_es.hierarchy_level = parent_shader.hierarchy_level + 1;
+
+	// Set a descriptive name for the group editor
+	String group_name = "Group " + itos(group_node_id);
+	if (parent_shader.is_group_editor) {
+		group_name = "Nested " + group_name;
+	}
+	group_es.name = group_name;
+
+	print_line("[VS_GROUP_DEBUG] Group editor name: ", group_name);
+
+	// Create VisualShaderEditor instance configured for group editing
+	print_line("[VS_GROUP_DEBUG] Creating new VisualShaderEditor instance...");
+	VisualShaderEditor *group_editor = memnew(VisualShaderEditor);
+	group_editor->set_toggle_list_control(shader_list);
+
+	print_line("[VS_GROUP_DEBUG] Calling setup_group_editing on new editor...");
+	group_editor->setup_group_editing(vs, group_node_id, group_type);
+
+	group_es.shader_editor = group_editor;
+	shader_tabs->add_child(group_editor);
+
+	// Update parent-child relationships
+	parent_shader.child_editor_indices.push_back(edited_shaders.size());
+
+	// Add to list first
+	edited_shaders.push_back(group_es);
+
+	// Then switch to the new tab (which is now at the correct index)
+	int new_tab_index = shader_tabs->get_tab_count() - 1;
+	print_line("[VS_GROUP_DEBUG] Setting current tab to: ", new_tab_index, " (total tabs: ", shader_tabs->get_tab_count(), ")");
+	shader_tabs->set_current_tab(new_tab_index);
+
+	// Update the shader list and switch to the editor
+	print_line("[VS_GROUP_DEBUG] Updating shader list...");
+	_update_shader_list();
+
+	print_line("[VS_GROUP_DEBUG] Switching to group editor...");
+	_switch_to_editor(group_editor);
+
+	// Force the shader list to select the correct item
+	print_line("[VS_GROUP_DEBUG] Selecting shader list item: ", new_tab_index);
+	shader_list->select(new_tab_index);
+
+	// Make sure the shader list is visible and the group editor is the current tab
+	print_line("[VS_GROUP_DEBUG] Current tab after all operations: ", shader_tabs->get_current_tab());
+	print_line("[VS_GROUP_DEBUG] Selected shader list item: ", shader_list->get_selected_items().size() > 0 ? shader_list->get_selected_items()[0] : -1);
+
+	print_line("[VS_GROUP_DEBUG] Group editor created and activated successfully!");
+}
+
+int ShaderEditorPlugin::find_shader_editor(ShaderEditor *p_editor) {
+	for (int i = 0; i < edited_shaders.size(); i++) {
+		if (edited_shaders[i].shader_editor == p_editor) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+void ShaderEditorPlugin::notify_group_changed(int group_node_id, int group_type) {
+	// Update all editors that might display this group
+	for (EditedShader &es : edited_shaders) {
+		if (!es.is_group_editor && es.shader_editor) {
+			VisualShaderEditor *vs_editor = Object::cast_to<VisualShaderEditor>(es.shader_editor);
+			if (vs_editor) {
+				vs_editor->refresh_group_display(group_node_id, group_type);
+			}
+		}
+	}
+}
+
+void ShaderEditorPlugin::close_group_editors_recursively(int editor_index) {
+	if (editor_index < 0 || editor_index >= edited_shaders.size()) {
+		return;
+	}
+
+	EditedShader &closing_shader = edited_shaders[editor_index];
+
+	// Close all child group editors recursively (in reverse order to avoid index shifts)
+	Vector<int> children_to_close = closing_shader.child_editor_indices;
+	for (int i = children_to_close.size() - 1; i >= 0; i--) {
+		int child_index = children_to_close[i];
+		if (child_index < edited_shaders.size()) {
+			close_group_editors_recursively(child_index);
+			_close_shader(child_index);
+		}
+	}
+}
+
 void ShaderEditorPlugin::_notification(int p_what) {
 	switch (p_what) {
 		case NOTIFICATION_READY: {
@@ -876,6 +1104,7 @@ void ShaderEditorPlugin::_notification(int p_what) {
 }
 
 ShaderEditorPlugin::ShaderEditorPlugin() {
+	singleton = this;
 	window_wrapper = memnew(WindowWrapper);
 	window_wrapper->set_window_title(vformat(TTR("%s - Godot Engine"), TTR("Shader Editor")));
 	window_wrapper->set_margins_enabled(true);
@@ -944,4 +1173,8 @@ ShaderEditorPlugin::ShaderEditorPlugin() {
 	files_split->add_child(shader_create_dialog);
 	shader_create_dialog->connect("shader_created", callable_mp(this, &ShaderEditorPlugin::_shader_created));
 	shader_create_dialog->connect("shader_include_created", callable_mp(this, &ShaderEditorPlugin::_shader_include_created));
+}
+
+ShaderEditorPlugin::~ShaderEditorPlugin() {
+	singleton = nullptr;
 }
